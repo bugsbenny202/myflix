@@ -3,7 +3,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle } from 'lucide-react';
-
+//hello
 // --- Helper for Environment Variables ---
 const getEnv = (key, defaultValue) => {
   // This function safely retrieves environment variables.
@@ -668,7 +668,7 @@ export default function App() {
         <div className="bg-gray-900 min-h-screen text-white font-sans">
             <input type="file" multiple webkitdirectory="" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
             <Header />
-
+        
             <main className="p-8">
                 <ApiKeyWarning />
                 <FirebaseWarning />
