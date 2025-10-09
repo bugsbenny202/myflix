@@ -393,11 +393,14 @@ export default function App() {
     };
 
     const DetailView = () => {
+        // FIXED: Moved useRef to the top level of the component
+        const tagInputRef = useRef(null);
+
         if (!selectedMedia) return null;
+
         const metadata = metadataCache[selectedMedia.id] || {};
         const title = metadata.Title || cleanMediaName(selectedMedia.videoFile.name);
         const poster = metadata.Poster && metadata.Poster !== 'N/A' ? metadata.Poster : 'https://placehold.co/300x450/1a1a1a/FFFFFF?text=No+Image';
-        const tagInputRef = useRef(null);
 
         const handleAddTag = (e) => {
             e.preventDefault();
