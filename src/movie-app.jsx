@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp, collection, addDoc, getDoc } from 'firebase/firestore';
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle, Volume2, Volume1, VolumeX } from 'lucide-react';
 
 // --- Configuration ---
@@ -10,6 +10,13 @@ const firebaseConfig = window.APP_CONFIG?.FIREBASE_CONFIG || {};
 const TMDB_API_KEY = window.APP_CONFIG?.TMDB_API_KEY || null;
 const appId = 'default-app-id'; // This can remain a default value
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
+
+// WebRTC configuration - using public STUN servers
+const peerConnectionConfig = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+  ],
+};
 
 
 // --- Helper Functions ---
@@ -39,12 +46,14 @@ export default function App() {
     const [db, setDb] = useState(null);
     const [auth, setAuth] = useState(null);
     const [userId, setUserId] = useState(null);
-    const [watchParty, setWatchParty] = useState({ id: null, isHost: false, unsubscribe: null });
+    const [watchParty, setWatchParty] = useState({ id: null, isHost: false });
     const [isFirebaseReady, setIsFirebaseReady] = useState(false);
 
     const fileInputRef = useRef(null);
     const mainGridRef = useRef(null);
     const tagInputRef = useRef(null);
+    const peerConnections = useRef(new Map());
+
 
     // --- Firebase Initialization ---
     useEffect(() => {
@@ -230,56 +239,36 @@ export default function App() {
         try {
             await setDoc(partyRef, {
                 hostId: userId,
-                mediaName: selectedMedia.videoFile.name,
-                isPlaying: false,
-                currentTime: 0,
-                lastUpdated: serverTimestamp(),
-                participants: [userId]
+                mediaName: metadataCache[selectedMedia.id]?.Title || cleanMediaName(selectedMedia.videoFile.name),
+                createdAt: serverTimestamp(),
             });
-            joinWatchParty(partyId, true);
+            setWatchParty({ id: partyId, isHost: true });
+            setIsDetailView(false);
             setIsPlayerView(true);
         } catch (error) {
             console.error("Error creating watch party:", error);
         }
     };
 
-    const joinWatchParty = (partyId, isHost = false) => {
+    const joinWatchParty = (partyId) => {
         if (!isFirebaseReady || !db || !userId) return;
-        if (watchParty.unsubscribe) watchParty.unsubscribe();
-
-        const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", partyId);
-        const unsubscribe = onSnapshot(partyRef, (doc) => {
-            if (doc.exists()) {
-                const data = doc.data();
-                if (!data.participants?.includes(userId)) {
-                    updateDoc(partyRef, {
-                        participants: [...(data.participants || []), userId]
-                    });
-                }
-            }
-        });
         
-        setWatchParty({ id: partyId, isHost, unsubscribe });
+        setWatchParty({ id: partyId, isHost: false });
         setIsPlayerView(true);
     };
 
     const handleJoinPrompt = () => {
         const partyId = prompt("Enter Watch Party ID:");
         if (partyId) {
-            // Find a media item to associate with the party. This is a simplification.
-            // In a real app, you'd fetch the media info from the party document.
-            if(mediaLibrary.length > 0) {
-                 setSelectedMedia(mediaLibrary[0]);
-                 joinWatchParty(partyId.toUpperCase());
-            } else {
-                alert("Please upload your media library before joining a party.");
-            }
+            joinWatchParty(partyId.toUpperCase());
         }
     };
 
     const leaveWatchParty = () => {
-        if (watchParty.unsubscribe) watchParty.unsubscribe();
-        setWatchParty({ id: null, isHost: false, unsubscribe: null });
+        // Clean up all peer connections
+        peerConnections.current.forEach(pc => pc.close());
+        peerConnections.current.clear();
+        setWatchParty({ id: null, isHost: false });
         setIsPlayerView(false);
     };
     
@@ -366,6 +355,12 @@ export default function App() {
             tagInputRef.current.value = '';
         };
 
+        const playSolo = () => {
+            setIsDetailView(false);
+            setWatchParty({ id: null, isHost: false });
+            setIsPlayerView(true);
+        };
+
         return (
             <div className="fixed inset-0 bg-black/80 backdrop-blur-lg z-30 flex items-center justify-center p-4" onClick={() => setIsDetailView(false)}>
                 <div className="bg-gray-900 rounded-xl max-w-4xl w-full flex gap-8 p-8 relative overflow-hidden" onClick={e => e.stopPropagation()}>
@@ -393,7 +388,7 @@ export default function App() {
                         </div>
 
                         <div className="flex gap-4 mt-8">
-                            <button onClick={() => { setIsDetailView(false); setIsPlayerView(true); }} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1">Play</button>
+                            <button onClick={playSolo} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1">Play Solo</button>
                             <button onClick={createWatchParty} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Create Watch Party</button>
                         </div>
                     </div>
@@ -405,117 +400,166 @@ export default function App() {
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const playerContainerRef = useRef(null);
-        const [isPlaying, setIsPlaying] = useState(true); // Start playing by default
+        const [isPlaying, setIsPlaying] = useState(true);
         const [progress, setProgress] = useState(0);
         const [duration, setDuration] = useState(0);
         const [volume, setVolume] = useState(1);
         const [isSettingsOpen, setIsSettingsOpen] = useState(false);
         const [subtitleSettings, setSubtitleSettings] = useState({ color: '#FFFFFF', size: 24, background: 'rgba(0,0,0,0.5)' });
-        const [partyState, setPartyState] = useState(null);
         const [isFullScreen, setIsFullScreen] = useState(false);
         const [isFullScreenSupported, setIsFullScreenSupported] = useState(false);
-        const isSyncing = useRef(false);
-        
+        const [stream, setStream] = useState(null);
+        const [partyInfo, setPartyInfo] = useState(null);
+
+        const isGuest = watchParty.id && !watchParty.isHost;
+        const isSolo = !watchParty.id;
+
         useEffect(() => {
             setIsFullScreenSupported(!!document.fullscreenEnabled);
-        }, []);
-
-        const videoSrc = selectedMedia ? URL.createObjectURL(selectedMedia.videoFile) : null;
-        const subtitleSrc = selectedMedia?.subtitleFile ? URL.createObjectURL(selectedMedia.subtitleFile) : null;
-
-        // Effect to handle playing the video when the component loads
-        useEffect(() => {
-            if (videoRef.current && videoSrc) {
-                videoRef.current.play().catch(error => {
-                    console.log("Auto-play was prevented. User must interact to play.", error);
-                    setIsPlaying(false);
+            if (isGuest) {
+                 // Guest logic: get party info and initiate connection
+                const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
+                getDoc(partyRef).then(docSnap => {
+                    if (docSnap.exists()) {
+                        setPartyInfo(docSnap.data());
+                    }
                 });
             }
-        }, [videoSrc]);
+        }, [isGuest]);
 
-        const updatePartyState = useCallback(async (state) => {
-            if (watchParty.id && watchParty.isHost && isFirebaseReady) {
-                const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
-                await updateDoc(partyRef, { ...state, lastUpdated: serverTimestamp() });
-            }
-        }, [watchParty.id, watchParty.isHost, db, isFirebaseReady]);
-
+        // Host: Listen for guests and create peer connections
         useEffect(() => {
-            if (!watchParty.id || !isFirebaseReady) return;
+            if (!watchParty.isHost || !db || !videoRef.current) return;
+        
             const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
-            const unsubscribe = onSnapshot(partyRef, (doc) => {
-                if(doc.exists()) setPartyState(doc.data());
+            const guestsRef = collection(partyRef, 'guests');
+        
+            const unsubscribe = onSnapshot(guestsRef, (snapshot) => {
+                snapshot.docChanges().forEach(async (change) => {
+                    if (change.type === 'added') {
+                        const guestId = change.doc.id;
+                        const guestData = change.doc.data();
+                        
+                        if (guestData.offer && !peerConnections.current.has(guestId)) {
+                            const pc = new RTCPeerConnection(peerConnectionConfig);
+                            peerConnections.current.set(guestId, pc);
+                            
+                            // Add host's video stream to the connection
+                            const videoStream = videoRef.current.captureStream();
+                            videoStream.getTracks().forEach(track => pc.addTrack(track, videoStream));
+        
+                            await pc.setRemoteDescription(new RTCSessionDescription(guestData.offer));
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+        
+                            await updateDoc(change.doc.ref, { answer });
+        
+                            pc.onicecandidate = (event) => {
+                                if (event.candidate) {
+                                    addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
+                                }
+                            };
+                        }
+                    }
+                });
             });
+        
             return () => unsubscribe();
-        }, [watchParty.id, db, isFirebaseReady]);
+        }, [watchParty.isHost, db]);
 
+        // Guest: Create offer and set up peer connection
         useEffect(() => {
-            const syncPlayer = async () => {
-                if (!videoRef.current || watchParty.isHost || !partyState || isSyncing.current) return;
-                
-                isSyncing.current = true;
-                const video = videoRef.current;
-                if (Math.abs(video.currentTime - partyState.currentTime) > 2) {
-                    video.currentTime = partyState.currentTime;
+            if (!isGuest || !db || !partyInfo) return;
+        
+            const pc = new RTCPeerConnection(peerConnectionConfig);
+            peerConnections.current.set(userId, pc);
+        
+            pc.ontrack = (event) => {
+                if (event.streams && event.streams[0]) {
+                    setStream(event.streams[0]);
                 }
-                if (partyState.isPlaying && video.paused) {
-                    try { await video.play(); } catch (e) { if(e.name !== 'AbortError') console.error(e); }
-                } else if (!partyState.isPlaying && !video.paused) {
-                    video.pause();
-                }
-                isSyncing.current = false;
             };
-            syncPlayer();
-        }, [partyState, watchParty.isHost]);
+        
+            const setupConnection = async () => {
+                const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
+                const guestRef = doc(partyRef, 'guests', userId);
 
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+
+                await setDoc(guestRef, { offer });
+
+                // Listen for the host's answer
+                const unsubAnswer = onSnapshot(guestRef, async (snapshot) => {
+                    const data = snapshot.data();
+                    if (!pc.currentRemoteDescription && data?.answer) {
+                        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                    }
+                });
+
+                // Listen for host's ICE candidates
+                 const hostCandidatesRef = collection(guestRef, 'hostCandidates');
+                 const unsubHostCandidates = onSnapshot(hostCandidatesRef, (snapshot) => {
+                     snapshot.docChanges().forEach((change) => {
+                         if (change.type === 'added') {
+                             pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                         }
+                     });
+                 });
+
+                return () => {
+                    unsubAnswer();
+                    unsubHostCandidates();
+                }
+            };
+            
+            setupConnection();
+
+        }, [isGuest, db, partyInfo, userId]);
+        
+        // Assign stream to video element for guests
+        useEffect(() => {
+            if (videoRef.current && stream && isGuest) {
+                videoRef.current.srcObject = stream;
+                videoRef.current.play().catch(e => console.error("Error playing stream:", e));
+            }
+        }, [stream, isGuest]);
+
+        const videoSrc = (watchParty.isHost || isSolo) && selectedMedia ? URL.createObjectURL(selectedMedia.videoFile) : null;
+        const subtitleSrc = (watchParty.isHost || isSolo) && selectedMedia?.subtitleFile ? URL.createObjectURL(selectedMedia.subtitleFile) : null;
 
         const togglePlay = useCallback(() => {
-            if (!videoRef.current) return;
-            if (videoRef.current.paused) {
-                videoRef.current.play();
-            } else {
-                videoRef.current.pause();
-            }
-        }, []);
+            if (!videoRef.current || isGuest) return;
+            if (videoRef.current.paused) videoRef.current.play();
+            else videoRef.current.pause();
+        }, [isGuest]);
 
         const handleTimeUpdate = useCallback(() => {
-            if (!videoRef.current) return;
-            setProgress(videoRef.current.currentTime);
-            if(watchParty.isHost && Math.abs(videoRef.current.currentTime - (partyState?.currentTime || 0)) > 5) {
-                updatePartyState({ currentTime: videoRef.current.currentTime });
-            }
-        }, [partyState, updatePartyState, watchParty.isHost]);
+            if (videoRef.current) setProgress(videoRef.current.currentTime);
+        }, []);
 
         const handleSeek = (e) => {
-            if (watchParty.id && !watchParty.isHost) return;
+            if (isGuest) return;
             const progressBar = e.currentTarget;
             const rect = progressBar.getBoundingClientRect();
             const offsetX = e.clientX - rect.left;
             const seekTime = (offsetX / rect.width) * duration;
-            videoRef.current.currentTime = seekTime;
-            setProgress(seekTime); // Immediately update UI
-            updatePartyState({ currentTime: seekTime });
+            if (videoRef.current) {
+                videoRef.current.currentTime = seekTime;
+                setProgress(seekTime);
+            }
         };
         
         const handleVolumeChange = (e) => {
             const newVolume = parseFloat(e.target.value);
-            if (videoRef.current) {
-                videoRef.current.volume = newVolume;
-            }
+            if (videoRef.current) videoRef.current.volume = newVolume;
             setVolume(newVolume);
         };
 
         const toggleFullScreen = () => {
             if (!isFullScreenSupported) return;
-            try {
-                if (!document.fullscreenElement) {
-                    playerContainerRef.current.requestFullscreen();
-                } else {
-                    document.exitFullscreen();
-                }
-            } catch (error) {
-                console.error("Fullscreen request failed:", error);
-            }
+            if (!document.fullscreenElement) playerContainerRef.current.requestFullscreen();
+            else document.exitFullscreen();
         };
 
         useEffect(() => {
@@ -527,36 +571,20 @@ export default function App() {
         useEffect(() => {
             const vid = videoRef.current;
             if (!vid) return;
-
             const onPlay = () => setIsPlaying(true);
             const onPause = () => setIsPlaying(false);
             const onLoadedMetadata = () => setDuration(vid.duration);
-            
-            // Centralized event listener setup
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
             vid.addEventListener('timeupdate', handleTimeUpdate);
             vid.addEventListener('loadedmetadata', onLoadedMetadata);
-
-            // Host sync listeners
-            if (watchParty.isHost) {
-                vid.addEventListener('play', () => updatePartyState({ isPlaying: true }));
-                vid.addEventListener('pause', () => updatePartyState({ isPlaying: false }));
-            }
-
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
                 vid.removeEventListener('timeupdate', handleTimeUpdate);
                 vid.removeEventListener('loadedmetadata', onLoadedMetadata);
-                if (watchParty.isHost) {
-                    vid.removeEventListener('play', () => updatePartyState({ isPlaying: true }));
-                    vid.removeEventListener('pause', () => updatePartyState({ isPlaying: false }));
-                }
             };
-        }, [handleTimeUpdate, updatePartyState, watchParty.isHost]);
-
-        if (!selectedMedia) return null;
+        }, [handleTimeUpdate]);
         
         const VolumeIcon = () => {
             if (volume === 0) return <VolumeX size={24} />;
@@ -564,39 +592,36 @@ export default function App() {
             return <Volume2 size={24} />;
         };
 
+        const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
+
         return (
             <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
-                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous">
-                    <source src={videoSrc} type={selectedMedia.videoFile.type} />
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" autoPlay>
+                    {videoSrc && <source src={videoSrc} type={selectedMedia.videoFile.type} />}
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
                 <div className="absolute inset-0 group">
                     <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/70 to-transparent flex justify-between items-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                          <div>
                             <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500"><ChevronsLeft size={32} /></button>
-                            <span className="text-white text-xl ml-4">{metadataCache[selectedMedia.id]?.Title || '...'}</span>
+                            <span className="text-white text-xl ml-4">{partyTitle || 'Loading...'}</span>
                          </div>
                          {watchParty.id && <div className="text-white bg-red-600 px-3 py-1 rounded-md">Party ID: {watchParty.id}</div>}
                     </div>
-                    <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                        <div className="w-full h-1.5 bg-gray-600/50 group/progress relative cursor-pointer" onClick={handleSeek}>
+                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div 
+                            className={`w-full h-1.5 bg-gray-600/50 group/progress relative ${isGuest ? 'cursor-not-allowed' : 'cursor-pointer'}`} 
+                            onClick={handleSeek}
+                        >
                             <div className="absolute top-0 left-0 h-full bg-red-500" style={{ width: `${(progress / duration) * 100}%` }}></div>
                             <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-[5px] opacity-0 group-hover/progress:opacity-100" style={{ left: `calc(${(progress / duration) * 100}% - 8px)` }}></div>
                         </div>
                         <div className="flex items-center justify-between mt-2">
                             <div className="flex items-center gap-4">
-                                <button onClick={togglePlay} className="text-white" disabled={watchParty.id && !watchParty.isHost}>{isPlaying ? <Pause size={28}/> : <Play size={28}/>}</button>
+                                <button onClick={togglePlay} className="text-white" disabled={isGuest}>{isPlaying ? <Pause size={28}/> : <Play size={28}/>}</button>
                                 <div className="flex items-center gap-2 group/volume">
                                     <button onClick={() => setVolume(v => v > 0 ? 0 : 1)} className="text-white"><VolumeIcon /></button>
-                                    <input 
-                                       type="range" 
-                                       min="0" 
-                                       max="1" 
-                                       step="0.05" 
-                                       value={volume} 
-                                       onChange={handleVolumeChange}
-                                       className="w-0 group-hover/volume:w-24 transition-all duration-300"
-                                    />
+                                    <input type="range" min="0" max="1" step="0.05" value={volume} onChange={handleVolumeChange} className="w-0 group-hover/volume:w-24 transition-all duration-300" />
                                 </div>
                             </div>
                             <div className="flex items-center gap-4">
