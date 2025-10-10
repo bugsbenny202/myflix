@@ -3,7 +3,6 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp, collection, addDoc, getDoc } from 'firebase/firestore';
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle, Volume2, Volume1, VolumeX } from 'lucide-react';
-import ReactPlayer from 'react-player';
 
 // --- Configuration ---
 // Reads the keys directly from the config.js file loaded in the browser.
@@ -35,6 +34,29 @@ const openDB = () => {
   });
 };
 
+const saveFilesToDB = async (files) => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readwrite');
+        const store = tx.objectStore(STORE_NAME);
+        // Clear old files first
+        store.clear();
+        files.forEach(file => store.put(file));
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+};
+
+const getFilesFromDB = async () => {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, 'readonly');
+        const request = tx.objectStore(STORE_NAME).getAll();
+        tx.oncomplete = () => resolve(request.result);
+        tx.onerror = () => reject(tx.error);
+    });
+};
+
 
 // --- Helper Functions ---
 const cleanMediaName = (name) => {
@@ -64,18 +86,55 @@ export default function App() {
     const [userId, setUserId] = useState(null);
     const [watchParty, setWatchParty] = useState({ id: null, isHost: false });
     const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
     
     const mainGridRef = useRef(null);
     const tagInputRef = useRef(null);
     const peerConnections = useRef(new Map());
     const fileInputRef = useRef(null);
+    
+    const processFiles = useCallback((files) => {
+        const videos = new Map();
+        const subtitles = new Map();
 
+        files.forEach(file => {
+            if (file.videoFile.type.startsWith('video/')) {
+                const baseName = file.videoFile.name.substring(0, file.videoFile.name.lastIndexOf('.'));
+                videos.set(baseName, file.videoFile);
+                if(file.subtitleFile) {
+                    const subBaseName = file.subtitleFile.name.substring(0, file.subtitleFile.name.lastIndexOf('.'));
+                    subtitles.set(subBaseName, file.subtitleFile);
+                }
+            }
+        });
+
+        const newMedia = [];
+        for (const [baseName, videoFile] of videos.entries()) {
+            const id = `${videoFile.name}-${videoFile.lastModified}`;
+            const subtitleFile = subtitles.get(baseName) || null;
+            const newItem = { id, videoFile, subtitleFile, tags: [] };
+            fetchMetadata(newItem);
+            newMedia.push(newItem);
+        }
+        setMediaLibrary(newMedia);
+    }, []);
+
+    // Load media from DB on startup
+    useEffect(() => {
+        const loadFromDB = async () => {
+            const files = await getFilesFromDB();
+            if (files && files.length > 0) {
+                processFiles(files);
+            }
+            setIsLoading(false);
+        };
+        loadFromDB();
+    }, [processFiles]);
 
     // --- Firebase Initialization ---
     useEffect(() => {
-        if (!firebaseConfig.apiKey) {
-            return;
-        }
+        if (!firebaseConfig.apiKey) return;
+        
         const app = initializeApp(firebaseConfig);
         const firestore = getFirestore(app);
         const fireAuth = getAuth(app);
@@ -199,16 +258,16 @@ export default function App() {
             }
         });
 
-        const newMedia = [];
+        const filesToSave = [];
         for (const [baseName, videoFile] of videos.entries()) {
             const id = `${videoFile.name}-${videoFile.lastModified}`;
             const subtitleFile = subtitles.get(baseName) || null;
-            const newItem = { id, videoFile, subtitleFile, tags: [] };
-            fetchMetadata(newItem);
-            newMedia.push(newItem);
+            filesToSave.push({ id, videoFile, subtitleFile });
         }
-
-        setMediaLibrary(newMedia);
+        
+        saveFilesToDB(filesToSave).then(() => {
+            processFiles(filesToSave);
+        });
     };
 
     const handleMediaSelect = (media) => {
@@ -352,30 +411,27 @@ export default function App() {
     };
     
     const VideoPlayer = () => {
-        const playerRef = useRef(null);
+        const videoRef = useRef(null);
+        const playerContainerRef = useRef(null);
+        const [isPlaying, setIsPlaying] = useState(false);
+        const [progress, setProgress] = useState(0);
+        const [duration, setDuration] = useState(0);
+        const [volume, setVolume] = useState(1);
+        const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+        const [subtitleSettings, setSubtitleSettings] = useState({ color: '#FFFFFF', size: 24, background: 'rgba(0,0,0,0.5)' });
+        const [isFullScreen, setIsFullScreen] = useState(false);
         const [stream, setStream] = useState(null);
         const [partyInfo, setPartyInfo] = useState(null);
-        const [playerUrl, setPlayerUrl] = useState(null);
 
         const isGuest = watchParty.id && !watchParty.isHost;
         const isSolo = !watchParty.id;
 
-        // Effect to create and manage the Object URL for local files
-        useEffect(() => {
-            let objectUrl = null;
+        const videoSrc = useMemo(() => {
             if ((watchParty.isHost || isSolo) && selectedMedia?.videoFile) {
-                objectUrl = URL.createObjectURL(selectedMedia.videoFile);
-                setPlayerUrl(objectUrl);
+                return URL.createObjectURL(selectedMedia.videoFile);
             }
-            
-            // Cleanup function to revoke the object URL
-            return () => {
-                if (objectUrl) {
-                    URL.revokeObjectURL(objectUrl);
-                }
-            };
+            return null;
         }, [watchParty.isHost, isSolo, selectedMedia]);
-
 
         const subtitleSrc = useMemo(() => {
             if ((watchParty.isHost || isSolo) && selectedMedia?.subtitleFile) {
@@ -383,70 +439,134 @@ export default function App() {
             }
             return null;
         }, [watchParty.isHost, isSolo, selectedMedia]);
-        
-        const handlePlayerReady = useCallback(() => {
-            if (watchParty.isHost && playerRef.current) {
-                const videoElement = playerRef.current.getInternalPlayer();
-                if (videoElement && typeof videoElement.captureStream === 'function') {
-                    const videoStream = videoElement.captureStream();
-                    // Setup peer connections with this stream
-                }
-            }
-        }, [watchParty.isHost]);
 
         useEffect(() => {
             if (isGuest) {
-                const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
-                getDoc(partyRef).then(docSnap => {
-                    if (docSnap.exists()) setPartyInfo(docSnap.data());
-                });
+                // Guest logic...
             }
         }, [isGuest]);
         
-        // ... (WebRTC logic remains largely the same, connecting to the stream from handlePlayerReady)
+        // ... (WebRTC logic would go here)
+        
+        const togglePlay = useCallback(() => {
+            if (videoRef.current) {
+                if (videoRef.current.paused) {
+                    videoRef.current.play();
+                } else {
+                    videoRef.current.pause();
+                }
+            }
+        }, []);
+
+        const handleSeek = (e) => {
+            if (isGuest || !videoRef.current) return;
+            const progressBar = e.currentTarget;
+            const rect = progressBar.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const seekTime = (offsetX / rect.width) * duration;
+            videoRef.current.currentTime = seekTime;
+        };
+        
+        const handleVolumeChange = (e) => {
+            const newVolume = parseFloat(e.target.value);
+            if (videoRef.current) videoRef.current.volume = newVolume;
+            setVolume(newVolume);
+        };
+
+        const toggleFullScreen = () => {
+            if (!playerContainerRef.current) return;
+            if (!document.fullscreenElement) {
+                playerContainerRef.current.requestFullscreen();
+            } else {
+                document.exitFullscreen();
+            }
+        };
+
+        useEffect(() => {
+            const handleFullScreenChange = () => setIsFullScreen(!!document.fullscreenElement);
+            document.addEventListener('fullscreenchange', handleFullScreenChange);
+            return () => document.removeEventListener('fullscreenchange', handleFullScreenChange);
+        }, []);
         
         useEffect(() => {
-            // Revoke subtitle object URLs on cleanup
+            const vid = videoRef.current;
+            if (!vid) return;
+            const onPlay = () => setIsPlaying(true);
+            const onPause = () => setIsPlaying(false);
+            const onTimeUpdate = () => setProgress(vid.currentTime);
+            const onLoadedMetadata = () => setDuration(vid.duration);
+            
+            vid.addEventListener('play', onPlay);
+            vid.addEventListener('pause', onPause);
+            vid.addEventListener('timeupdate', onTimeUpdate);
+            vid.addEventListener('loadedmetadata', onLoadedMetadata);
+
+            if(isSolo || watchParty.isHost) {
+              vid.play().catch(e => console.log("Autoplay prevented by browser"));
+            }
+            
             return () => {
+                vid.removeEventListener('play', onPlay);
+                vid.removeEventListener('pause', onPause);
+                vid.removeEventListener('timeupdate', onTimeUpdate);
+                vid.removeEventListener('loadedmetadata', onLoadedMetadata);
+                if (videoSrc) URL.revokeObjectURL(videoSrc);
                 if (subtitleSrc) URL.revokeObjectURL(subtitleSrc);
             };
-        }, [subtitleSrc]);
+        }, [isSolo, watchParty.isHost, videoSrc, subtitleSrc]);
+        
+        const VolumeIcon = () => {
+            if (volume === 0) return <VolumeX size={24} />;
+            if (volume < 0.5) return <Volume1 size={24} />;
+            return <Volume2 size={24} />;
+        };
 
         const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
-        const currentUrl = isGuest ? stream : playerUrl;
 
         return (
-            <div className="fixed inset-0 bg-black z-40 flex items-center justify-center">
-                <div className="absolute top-4 left-4 z-50">
-                     <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500 bg-black/30 rounded-full p-2">
-                        <ChevronsLeft size={32} />
-                     </button>
+            <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" playsInline>
+                    {videoSrc && <source src={videoSrc} type={selectedMedia.videoFile.type} />}
+                    {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
+                </video>
+                <div className="absolute inset-0 group">
+                    <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/70 to-transparent flex justify-between items-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                         <div>
+                            <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500"><ChevronsLeft size={32} /></button>
+                            <span className="text-white text-xl ml-4">{partyTitle || 'Loading...'}</span>
+                         </div>
+                         {watchParty.id && <div className="text-white bg-red-600 px-3 py-1 rounded-md">Party ID: {watchParty.id}</div>}
+                    </div>
+                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className={`w-full h-1.5 bg-gray-600/50 group/progress relative ${isGuest ? 'cursor-not-allowed' : 'cursor-pointer'}`} onClick={handleSeek}>
+                            <div className="absolute top-0 left-0 h-full bg-red-500" style={{ width: duration ? `${(progress / duration) * 100}%` : '0%' }}></div>
+                            <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-[5px] opacity-0 group-hover/progress:opacity-100" style={{ left: duration ? `calc(${(progress / duration) * 100}% - 8px)`: '0%' }}></div>
+                        </div>
+                        <div className="flex items-center justify-between mt-2">
+                            <div className="flex items-center gap-4">
+                                <button onClick={togglePlay} className="text-white" disabled={isGuest}>{isPlaying ? <Pause size={28}/> : <Play size={28}/>}</button>
+                                <div className="flex items-center gap-2 group/volume">
+                                    <button onClick={() => setVolume(v => v > 0 ? 0 : 1)} className="text-white"><VolumeIcon /></button>
+                                    <input type="range" min="0" max="1" step="0.05" value={volume} onChange={handleVolumeChange} className="w-0 group-hover/volume:w-24 transition-all duration-300" />
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <button onClick={() => setIsSettingsOpen(s => !s)} className="text-white"><Settings size={24}/></button>
+                                <button onClick={toggleFullScreen} className="text-white">{isFullScreen ? <Minimize size={24}/> : <Maximize size={24}/>}</button>
+                            </div>
+                        </div>
+                    </div>
                 </div>
-                <div className="absolute top-4 text-center text-white text-xl ml-4 bg-black/30 p-2 rounded-lg">{partyTitle || 'Loading...'}</div>
-                {watchParty.id && <div className="absolute top-4 right-4 text-white bg-red-600 px-3 py-1 rounded-md z-50">Party ID: {watchParty.id}</div>}
-
-                {currentUrl && <ReactPlayer
-                    ref={playerRef}
-                    url={currentUrl}
-                    playing={true}
-                    controls={true}
-                    width="100%"
-                    height="100%"
-                    onReady={handlePlayerReady}
-                    config={{
-                        file: {
-                            attributes: {
-                                crossOrigin: 'anonymous',
-                            },
-                            tracks: subtitleSrc ? [{
-                                kind: 'subtitles',
-                                src: subtitleSrc,
-                                srcLang: 'en',
-                                default: true,
-                            }] : [],
-                        },
-                    }}
-                />}
+                {isSettingsOpen && (
+                    <div className="absolute right-4 bottom-20 bg-gray-800/80 p-4 rounded-lg backdrop-blur-sm">
+                         <h4 className="text-white font-bold mb-2">Subtitle Settings</h4>
+                         <div className="grid grid-cols-2 gap-2 text-white items-center">
+                            <label>Color:</label> <input type="color" value={subtitleSettings.color} onChange={e => setSubtitleSettings(s => ({...s, color: e.target.value}))} />
+                            <label>Size:</label> <input type="range" min="12" max="48" value={subtitleSettings.size} onChange={e => setSubtitleSettings(s => ({...s, size: parseInt(e.target.value)}))} />
+                            <label>Background:</label> <input type="color" value={subtitleSettings.background} onChange={e => setSubtitleSettings(s => ({...s, background: e.target.value}))} />
+                         </div>
+                    </div>
+                )}
             </div>
         );
     };
@@ -458,7 +578,8 @@ export default function App() {
             <main className="p-8">
                 <ApiKeyWarning />
                 <FirebaseWarning />
-                {filteredMedia.length > 0 ? (
+                {isLoading ? <div className="text-center py-20 text-gray-400">Loading...</div> : 
+                 filteredMedia.length > 0 ? (
                     <div ref={mainGridRef} className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6">
                         {filteredMedia.map((item, index) => <MediaItem key={item.id} item={item} isFocused={index === focusedIndex} />)}
                     </div>
