@@ -446,7 +446,7 @@ export default function App() {
                         
                         if (guestData.offer && !peerConnections.current.has(guestId)) {
                             // If player is playing, connect immediately. Otherwise, queue the guest.
-                            if (videoRef.current && !videoRef.current.paused) {
+                            if (videoRef.current && !videoRef.current.paused && videoRef.current.readyState > 2) {
                                 setupPeerConnectionForGuest(guestId, guestData, change.doc.ref);
                             } else {
                                 pendingGuests.current.set(guestId, { data: guestData, ref: change.doc.ref });
