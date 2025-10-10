@@ -5,24 +5,10 @@ import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } fro
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle } from 'lucide-react';
 
 // --- Configuration ---
-// Safely access environment variables to prevent "process is not defined" errors.
-const firebaseConfigString = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_FIREBASE_CONFIG)
-  ? process.env.REACT_APP_FIREBASE_CONFIG
-  : '{}';
-let firebaseConfig = {};
-try {
-    // Safely parse the Firebase config string
-    firebaseConfig = JSON.parse(firebaseConfigString);
-} catch (e) {
-    console.error("Could not parse Firebase config. Ensure it's a valid JSON string in your environment variables.", e);
-}
-
-const TMDB_API_KEY = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_TMDB_API_KEY)
-  ? process.env.REACT_APP_TMDB_API_KEY
-  : null;
-const appId = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_ID)
-  ? process.env.REACT_APP_ID
-  : 'default-app-id';
+// Reads the keys directly from the config.js file loaded in the browser.
+const firebaseConfig = window.APP_CONFIG?.FIREBASE_CONFIG || {};
+const TMDB_API_KEY = window.APP_CONFIG?.TMDB_API_KEY || null;
+const appId = 'default-app-id'; // This can remain a default value
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
 
 
@@ -435,8 +421,6 @@ export default function App() {
                 const playPromise = videoRef.current.play();
                 if (playPromise !== undefined) {
                     playPromise.catch(error => {
-                        // Auto-play was prevented, which is common in browsers.
-                        // The user will need to click the play button manually.
                         console.log("Auto-play was prevented. User must interact to play.", error);
                         setIsPlaying(false);
                     });
@@ -612,4 +596,3 @@ export default function App() {
         </div>
     );
 }
-
