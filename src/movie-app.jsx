@@ -3,25 +3,20 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle } from 'lucide-react';
-//hello
-// --- Helper for Environment Variables ---
-const getEnv = (key, defaultValue) => {
-  // This function safely retrieves environment variables.
-  // In a local/preview environment, `process` might not be defined.
-  // In a Vercel build, `process.env.REACT_APP_*` is replaced with a string.
-  if (typeof process !== 'undefined' && process.env && process.env[key]) {
-    return process.env[key];
-  }
-  return defaultValue;
-};
 
-// --- Firebase Configuration ---
-const firebaseConfig = JSON.parse(getEnv('REACT_APP_FIREBASE_CONFIG', '{}'));
-const appId = getEnv('REACT_APP_ID', 'default-app-id');
+// --- Configuration ---
+// This more direct approach is robust for Vercel's build environment.
+const firebaseConfigString = process.env.REACT_APP_FIREBASE_CONFIG || '{}';
+let firebaseConfig = {};
+try {
+    // Safely parse the Firebase config string
+    firebaseConfig = JSON.parse(firebaseConfigString);
+} catch (e) {
+    console.error("Could not parse Firebase config. Ensure it's a valid JSON string in your environment variables.", e);
+}
 
-
-// --- TMDB API Configuration ---
-const TMDB_API_KEY = getEnv('REACT_APP_TMDB_API_KEY', null);
+const TMDB_API_KEY = process.env.REACT_APP_TMDB_API_KEY || null;
+const appId = process.env.REACT_APP_ID || 'default-app-id';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
 
 // --- Helper Functions ---
@@ -56,11 +51,10 @@ export default function App() {
 
     const fileInputRef = useRef(null);
     const mainGridRef = useRef(null);
+    const tagInputRef = useRef(null);
 
     // --- Firebase Initialization ---
     useEffect(() => {
-        // Silently exit if Firebase config is not provided.
-        // The app will run in a local-only mode.
         if (!firebaseConfig.apiKey) {
             return;
         }
@@ -73,8 +67,6 @@ export default function App() {
 
         const authenticate = async () => {
             try {
-                 // In a deployed environment, we rely on anonymous sign-in
-                 // Custom tokens are more for specific server-side logic
                 await signInAnonymously(fireAuth);
                 setIsFirebaseReady(true);
             } catch (error) {
@@ -119,7 +111,7 @@ export default function App() {
         });
 
         setFilteredMedia(processed);
-        setFocusedIndex(0); // Reset focus on filter/sort change
+        setFocusedIndex(0);
     }, [mediaLibrary, searchTerm, sortOption, metadataCache]);
 
     // --- Controller and Keyboard Navigation ---
@@ -130,7 +122,6 @@ export default function App() {
             const gridItems = mainGridRef.current?.children;
             if (!gridItems || gridItems.length === 0) return;
             
-            // Calculate grid columns
             const gridComputedStyle = window.getComputedStyle(mainGridRef.current);
             const gridTemplateColumns = gridComputedStyle.getPropertyValue('grid-template-columns');
             const columns = gridTemplateColumns.split(' ').length;
@@ -156,15 +147,14 @@ export default function App() {
         const intervalId = setInterval(() => {
             const gamepads = navigator.getGamepads();
             if (gamepads[0]) {
-                 // Simplified gamepad logic, can be expanded
                 const gp = gamepads[0];
-                if (gp.buttons[14].pressed) handleKeyDown({ key: 'ArrowLeft', preventDefault: () => {} }); // D-Pad Left
-                if (gp.buttons[15].pressed) handleKeyDown({ key: 'ArrowRight', preventDefault: () => {} }); // D-Pad Right
-                if (gp.buttons[12].pressed) handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} }); // D-Pad Up
-                if (gp.buttons[13].pressed) handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} }); // D-Pad Down
-                if (gp.buttons[0].pressed) handleKeyDown({ key: 'Enter', preventDefault: () => {} }); // 'A' button
+                if (gp.buttons[14].pressed) handleKeyDown({ key: 'ArrowLeft', preventDefault: () => {} });
+                if (gp.buttons[15].pressed) handleKeyDown({ key: 'ArrowRight', preventDefault: () => {} });
+                if (gp.buttons[12].pressed) handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} });
+                if (gp.buttons[13].pressed) handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} });
+                if (gp.buttons[0].pressed) handleKeyDown({ key: 'Enter', preventDefault: () => {} });
             }
-        }, 150); // Poll every 150ms
+        }, 150);
 
         window.addEventListener('keydown', handleKeyDown);
         return () => {
@@ -180,21 +170,15 @@ export default function App() {
 
         const title = cleanMediaName(item.videoFile.name);
         try {
-            // Step 1: Search for the movie to get its ID
             const searchResponse = await fetch(`https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`);
             const searchData = await searchResponse.json();
             const movieResult = searchData.results?.[0];
 
-            if (!movieResult) {
-                console.warn(`No TMDB result for: ${title}`);
-                return;
-            }
+            if (!movieResult) return;
 
-            // Step 2: Fetch detailed information using the movie ID
             const detailsResponse = await fetch(`https://api.themoviedb.org/3/movie/${movieResult.id}?api_key=${TMDB_API_KEY}&append_to_response=release_dates`);
             const detailsData = await detailsResponse.json();
 
-            // Step 3: Normalize the data to match the structure our app expects
             const usRelease = detailsData.release_dates?.results?.find(r => r.iso_3166_1 === 'US');
             const rating = usRelease?.release_dates?.find(rd => rd.certification)?.certification || 'N/A';
 
@@ -205,7 +189,7 @@ export default function App() {
                 Runtime: `${detailsData.runtime} min`,
                 Plot: detailsData.overview,
                 Poster: detailsData.poster_path ? `${TMDB_IMAGE_BASE_URL}${detailsData.poster_path}` : 'https://placehold.co/300x450/1a1a1a/FFFFFF?text=No+Image',
-                Type: 'movie', // TMDB differentiates, we'll assume movie for now
+                Type: 'movie',
             };
             
             setMetadataCache(prev => ({ ...prev, [item.id]: normalizedData }));
@@ -225,12 +209,7 @@ export default function App() {
             const videoBaseName = videoFile.name.substring(0, videoFile.name.lastIndexOf('.'));
             const subtitleFile = subtitles.find(s => s.name.startsWith(videoBaseName));
             
-            const newItem = {
-                id,
-                videoFile,
-                subtitleFile: subtitleFile || null,
-                tags: []
-            };
+            const newItem = { id, videoFile, subtitleFile, tags: [] };
             fetchMetadata(newItem);
             return newItem;
         });
@@ -273,22 +252,17 @@ export default function App() {
 
     const joinWatchParty = (partyId, isHost = false) => {
         if (!isFirebaseReady || !db || !userId) return;
-        if (watchParty.unsubscribe) watchParty.unsubscribe(); // Clean up old listener
+        if (watchParty.unsubscribe) watchParty.unsubscribe();
 
         const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", partyId);
         const unsubscribe = onSnapshot(partyRef, (doc) => {
             if (doc.exists()) {
-                // Update participants list if joining for first time
                 const data = doc.data();
                 if (!data.participants?.includes(userId)) {
                     updateDoc(partyRef, {
                         participants: [...(data.participants || []), userId]
                     });
                 }
-            } else {
-                console.warn("Watch party not found");
-                // Avoid using alert()
-                // alert("Watch party not found!");
             }
         });
         
@@ -310,7 +284,7 @@ export default function App() {
     };
     
 
-    // --- Sub-components (as functions for single-file structure) ---
+    // --- Sub-components ---
     const Header = () => (
         <header className="bg-gray-800/50 backdrop-blur-sm p-4 sticky top-0 z-20 flex items-center justify-between gap-4">
             <h1 className="text-2xl font-bold text-white tracking-wider">My<span className="text-red-500">Flix</span></h1>
@@ -345,33 +319,19 @@ export default function App() {
         </header>
     );
 
-    const ApiKeyWarning = () => {
-       if (!TMDB_API_KEY) {
-            return (
-                <div className="bg-yellow-500/20 border border-yellow-600 text-yellow-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
-                    <AlertTriangle/>
-                    <div>
-                        <strong>Warning:</strong> Movie metadata (posters, descriptions) is disabled because the TMDB API key is not configured.
-                    </div>
-                </div>
-            )
-       }
-       return null;
-    }
+    const ApiKeyWarning = () => !TMDB_API_KEY ? (
+        <div className="bg-yellow-500/20 border border-yellow-600 text-yellow-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
+            <AlertTriangle/>
+            <div><strong>Warning:</strong> Movie metadata (posters, descriptions) is disabled because the TMDB API key is not configured.</div>
+        </div>
+    ) : null;
 
-    const FirebaseWarning = () => {
-       if (!firebaseConfig.apiKey) {
-            return (
-                <div className="bg-blue-500/20 border border-blue-600 text-blue-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
-                    <AlertTriangle/>
-                    <div>
-                        <strong>Info:</strong> Watch Party features are disabled. To enable them, set up your Firebase configuration when deploying the app.
-                    </div>
-                </div>
-            )
-       }
-       return null;
-    }
+    const FirebaseWarning = () => !firebaseConfig.apiKey ? (
+        <div className="bg-blue-500/20 border border-blue-600 text-blue-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
+            <AlertTriangle/>
+            <div><strong>Info:</strong> Watch Party features are disabled. To enable them, set up your Firebase configuration when deploying the app.</div>
+        </div>
+    ) : null;
 
     const MediaItem = ({ item, isFocused }) => {
         const metadata = metadataCache[item.id];
@@ -393,9 +353,6 @@ export default function App() {
     };
 
     const DetailView = () => {
-        // FIXED: Moved useRef to the top level of the component
-        const tagInputRef = useRef(null);
-
         if (!selectedMedia) return null;
 
         const metadata = metadataCache[selectedMedia.id] || {};
@@ -435,7 +392,7 @@ export default function App() {
                         </div>
 
                         <div className="flex gap-4 mt-8">
-                            <button onClick={() => setIsPlayerView(true)} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1" disabled={!isFirebaseReady}>Play</button>
+                            <button onClick={() => { setIsDetailView(false); setIsPlayerView(true); }} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1">Play</button>
                             <button onClick={createWatchParty} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Create Watch Party</button>
                             <button onClick={handleJoinPrompt} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Join Party</button>
                         </div>
@@ -445,26 +402,22 @@ export default function App() {
         );
     };
     
-    // This is a complex component, so it's defined here.
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const playerContainerRef = useRef(null);
         const [isPlaying, setIsPlaying] = useState(false);
         const [progress, setProgress] = useState(0);
         const [duration, setDuration] = useState(0);
-        const [volume, setVolume] = useState(1);
-        const [showControls, setShowControls] = useState(true);
         const [isSettingsOpen, setIsSettingsOpen] = useState(false);
         const [subtitleSettings, setSubtitleSettings] = useState({ color: '#FFFFFF', size: 24, background: 'rgba(0,0,0,0.5)' });
         const [partyState, setPartyState] = useState(null);
         const [isFullScreen, setIsFullScreen] = useState(false);
         const [isFullScreenSupported, setIsFullScreenSupported] = useState(false);
         const isSyncing = useRef(false);
+        const controlsTimeout = useRef(null);
         
-        let controlsTimeout = useRef(null);
-
         useEffect(() => {
-            setIsFullScreenSupported(!!(document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullScreenEnabled || document.msFullscreenEnabled));
+            setIsFullScreenSupported(!!document.fullscreenEnabled);
         }, []);
 
         const videoSrc = selectedMedia ? URL.createObjectURL(selectedMedia.videoFile) : null;
@@ -478,7 +431,6 @@ export default function App() {
         }, [watchParty.id, watchParty.isHost, db, isFirebaseReady]);
 
         useEffect(() => {
-            // Subscribe to watch party state
             if (!watchParty.id || !isFirebaseReady) return;
             const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
             const unsubscribe = onSnapshot(partyRef, (doc) => {
@@ -488,43 +440,28 @@ export default function App() {
         }, [watchParty.id, db, isFirebaseReady]);
 
         useEffect(() => {
-            // Sync client player to party state
             const syncPlayer = async () => {
                 if (!videoRef.current || watchParty.isHost || !partyState || isSyncing.current) return;
                 
                 isSyncing.current = true;
                 const video = videoRef.current;
-
-                const timeDiff = Math.abs(video.currentTime - partyState.currentTime);
-                if (timeDiff > 2) { // Resync if more than 2s difference
+                if (Math.abs(video.currentTime - partyState.currentTime) > 2) {
                     video.currentTime = partyState.currentTime;
                 }
-
                 if (partyState.isPlaying && video.paused) {
-                    try {
-                        await video.play();
-                    } catch (error) {
-                        if (error.name !== 'AbortError') {
-                            console.error('Error playing video during sync:', error);
-                        }
-                    }
+                    try { await video.play(); } catch (e) { if(e.name !== 'AbortError') console.error(e); }
                 } else if (!partyState.isPlaying && !video.paused) {
                     video.pause();
                 }
                 isSyncing.current = false;
             };
-
             syncPlayer();
-
         }, [partyState, watchParty.isHost]);
 
 
         const togglePlay = () => {
-            if (videoRef.current.paused) {
-                videoRef.current.play();
-            } else {
-                videoRef.current.pause();
-            }
+            if (videoRef.current.paused) videoRef.current.play();
+            else videoRef.current.pause();
         };
 
         const handleTimeUpdate = () => {
@@ -541,26 +478,13 @@ export default function App() {
             videoRef.current.currentTime = seekTime;
             updatePartyState({ currentTime: seekTime });
         };
-
-        const handleMouseMove = () => {
-            setShowControls(true);
-            clearTimeout(controlsTimeout.current);
-            controlsTimeout.current = setTimeout(() => setShowControls(false), 3000);
-        };
-
+        
         const toggleFullScreen = () => {
-            if (!isFullScreenSupported) {
-                 console.warn("Fullscreen API is not supported in this environment.");
-                 return;
-            }
+            if (!isFullScreenSupported) return;
             try {
-                if (!document.fullscreenElement) {
-                    playerContainerRef.current.requestFullscreen();
-                    setIsFullScreen(true);
-                } else {
-                    document.exitFullscreen();
-                    setIsFullScreen(false);
-                }
+                if (!document.fullscreenElement) playerContainerRef.current.requestFullscreen();
+                else document.exitFullscreen();
+                setIsFullScreen(!!document.fullscreenElement);
             } catch (error) {
                 console.error("Fullscreen request failed:", error);
             }
@@ -570,55 +494,29 @@ export default function App() {
             const vid = videoRef.current;
             if (!vid) return;
 
-            const onPlay = () => {
-                setIsPlaying(true);
-                if (watchParty.isHost) {
-                    updatePartyState({ isPlaying: true });
-                }
-            };
-            const onPause = () => {
-                setIsPlaying(false);
-                if (watchParty.isHost) {
-                    updatePartyState({ isPlaying: false });
-                }
-            };
+            const onPlay = () => { setIsPlaying(true); if (watchParty.isHost) updatePartyState({ isPlaying: true }); };
+            const onPause = () => { setIsPlaying(false); if (watchParty.isHost) updatePartyState({ isPlaying: false }); };
             
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
             vid.addEventListener('timeupdate', handleTimeUpdate);
             vid.addEventListener('loadedmetadata', () => setDuration(vid.duration));
 
-            // Subtitle styling
-            if(vid.textTracks && vid.textTracks[0]) {
-                 const rule = `#player-container::cue { color: ${subtitleSettings.color}; font-size: ${subtitleSettings.size}px; background-color: ${subtitleSettings.background}; }`;
-                 const styleSheet = document.styleSheets[0];
-                 const index = styleSheet.cssRules.length;
-                 styleSheet.insertRule(rule, index);
-                 return () => {
-                    styleSheet.deleteRule(index);
-                    vid.removeEventListener('play', onPlay);
-                    vid.removeEventListener('pause', onPause);
-                 };
-            }
-            
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
             };
-
-        }, [selectedMedia, subtitleSettings, updatePartyState, watchParty.isHost]);
+        }, [updatePartyState, watchParty.isHost]);
 
         if (!selectedMedia) return null;
 
         return (
-            <div ref={playerContainerRef} id="player-container" className="fixed inset-0 bg-black z-40 flex items-center justify-center" onMouseMove={handleMouseMove}>
+            <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
                 <video ref={videoRef} className="w-full h-full" autoPlay>
                     <source src={videoSrc} type={selectedMedia.videoFile.type} />
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
-
-                <div className={`absolute inset-0 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}>
-                    {/* Top Controls */}
+                <div className="absolute inset-0">
                     <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/70 to-transparent flex justify-between items-center">
                          <div>
                             <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500"><ChevronsLeft size={32} /></button>
@@ -626,8 +524,6 @@ export default function App() {
                          </div>
                          {watchParty.id && <div className="text-white bg-red-600 px-3 py-1 rounded-md">Party ID: {watchParty.id}</div>}
                     </div>
-
-                    {/* Bottom Controls */}
                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent">
                         <div className={`w-full h-1.5 bg-gray-600 ${watchParty.id && !watchParty.isHost ? 'cursor-not-allowed' : 'cursor-pointer'}`} onClick={handleSeek}>
                             <div className="h-full bg-red-500" style={{ width: `${(progress / duration) * 100}%` }}></div>
@@ -635,7 +531,6 @@ export default function App() {
                         <div className="flex items-center justify-between mt-2">
                             <div className="flex items-center gap-4">
                                 <button onClick={togglePlay} className="text-white" disabled={watchParty.id && !watchParty.isHost}>{isPlaying ? <Pause size={28}/> : <Play size={28}/>}</button>
-                                {/* Volume Control Here */}
                             </div>
                             <div className="flex items-center gap-4">
                                 <button onClick={() => setIsSettingsOpen(s => !s)} className="text-white"><Settings size={24}/></button>
@@ -644,18 +539,13 @@ export default function App() {
                         </div>
                     </div>
                 </div>
-
-                {/* Subtitle Settings Panel */}
                 {isSettingsOpen && (
                     <div className="absolute right-4 bottom-20 bg-gray-800/80 p-4 rounded-lg backdrop-blur-sm">
                          <h4 className="text-white font-bold mb-2">Subtitle Settings</h4>
                          <div className="grid grid-cols-2 gap-2 text-white items-center">
-                            <label>Color:</label>
-                            <input type="color" value={subtitleSettings.color} onChange={e => setSubtitleSettings(s => ({...s, color: e.target.value}))} />
-                            <label>Size:</label>
-                            <input type="range" min="12" max="48" value={subtitleSettings.size} onChange={e => setSubtitleSettings(s => ({...s, size: parseInt(e.target.value)}))} />
-                            <label>Background:</label>
-                            <input type="color" value={subtitleSettings.background} onChange={e => setSubtitleSettings(s => ({...s, background: e.target.value}))} />
+                            <label>Color:</label> <input type="color" value={subtitleSettings.color} onChange={e => setSubtitleSettings(s => ({...s, color: e.target.value}))} />
+                            <label>Size:</label> <input type="range" min="12" max="48" value={subtitleSettings.size} onChange={e => setSubtitleSettings(s => ({...s, size: parseInt(e.target.value)}))} />
+                            <label>Background:</label> <input type="color" value={subtitleSettings.background} onChange={e => setSubtitleSettings(s => ({...s, background: e.target.value}))} />
                          </div>
                     </div>
                 )}
@@ -663,20 +553,16 @@ export default function App() {
         );
     };
 
-    // --- Render Logic ---
     return (
         <div className="bg-gray-900 min-h-screen text-white font-sans">
             <input type="file" multiple webkitdirectory="" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
             <Header />
-        
             <main className="p-8">
                 <ApiKeyWarning />
                 <FirebaseWarning />
                 {filteredMedia.length > 0 ? (
                     <div ref={mainGridRef} className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6">
-                        {filteredMedia.map((item, index) => (
-                            <MediaItem key={item.id} item={item} isFocused={index === focusedIndex} />
-                        ))}
+                        {filteredMedia.map((item, index) => <MediaItem key={item.id} item={item} isFocused={index === focusedIndex} />)}
                     </div>
                 ) : (
                     <div className="text-center py-20">
@@ -690,7 +576,6 @@ export default function App() {
                     </div>
                 )}
             </main>
-            
             {isDetailView && <DetailView />}
             {isPlayerView && <VideoPlayer />}
         </div>
