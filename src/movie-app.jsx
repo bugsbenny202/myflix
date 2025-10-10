@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp, collection, addDoc, getDoc } from 'firebase/firestore';
@@ -351,6 +351,20 @@ export default function App() {
         const isGuest = watchParty.id && !watchParty.isHost;
         const isSolo = !watchParty.id;
 
+        const videoSrc = useMemo(() => {
+            if ((watchParty.isHost || isSolo) && selectedMedia) {
+                return URL.createObjectURL(selectedMedia.videoFile);
+            }
+            return null;
+        }, [watchParty.isHost, isSolo, selectedMedia]);
+
+        const subtitleSrc = useMemo(() => {
+            if ((watchParty.isHost || isSolo) && selectedMedia?.subtitleFile) {
+                return URL.createObjectURL(selectedMedia.subtitleFile);
+            }
+            return null;
+        }, [watchParty.isHost, isSolo, selectedMedia]);
+
         useEffect(() => {
             setIsFullScreenSupported(!!document.fullscreenEnabled);
             if (isGuest) {
@@ -422,17 +436,19 @@ export default function App() {
         useEffect(() => {
             if (videoRef.current && stream && isGuest) {
                 videoRef.current.srcObject = stream;
+                videoRef.current.play().catch(e => console.error("Guest autoplay failed", e));
             }
         }, [stream, isGuest]);
 
-        const videoSrc = (watchParty.isHost || isSolo) && selectedMedia ? URL.createObjectURL(selectedMedia.videoFile) : null;
-        const subtitleSrc = (watchParty.isHost || isSolo) && selectedMedia?.subtitleFile ? URL.createObjectURL(selectedMedia.subtitleFile) : null;
-
         const togglePlay = useCallback(() => {
-            if (!videoRef.current || isGuest) return;
-            if (videoRef.current.paused) videoRef.current.play();
-            else videoRef.current.pause();
-        }, [isGuest]);
+            if (videoRef.current) {
+                if (videoRef.current.paused) {
+                    videoRef.current.play();
+                } else {
+                    videoRef.current.pause();
+                }
+            }
+        }, []);
 
         const handleSeek = (e) => {
             if (isGuest || !videoRef.current) return;
@@ -468,20 +484,23 @@ export default function App() {
             const onPause = () => setIsPlaying(false);
             const onTimeUpdate = () => setProgress(vid.currentTime);
             const onLoadedMetadata = () => setDuration(vid.duration);
+            
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
             vid.addEventListener('timeupdate', onTimeUpdate);
             vid.addEventListener('loadedmetadata', onLoadedMetadata);
-            if(isSolo || watchParty.isHost) {
-              vid.play().catch(e => console.log("Autoplay prevented"));
-            }
+
+            // Cleanup function
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
                 vid.removeEventListener('timeupdate', onTimeUpdate);
                 vid.removeEventListener('loadedmetadata', onLoadedMetadata);
+                // Revoke object URLs to prevent memory leaks
+                if (videoSrc) URL.revokeObjectURL(videoSrc);
+                if (subtitleSrc) URL.revokeObjectURL(subtitleSrc);
             };
-        }, [isSolo, watchParty.isHost]);
+        }, [videoSrc, subtitleSrc]);
         
         const VolumeIcon = () => {
             if (volume === 0) return <VolumeX size={24} />;
@@ -493,7 +512,7 @@ export default function App() {
 
         return (
             <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
-                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous">
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" playsInline autoPlay>
                     {videoSrc && <source src={videoSrc} type={selectedMedia.videoFile.type} />}
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
