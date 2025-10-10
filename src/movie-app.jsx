@@ -39,8 +39,7 @@ const saveFilesToDB = async (files) => {
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readwrite');
         const store = tx.objectStore(STORE_NAME);
-        // Clear old files first
-        store.clear();
+        store.clear(); // Clear old files before adding new ones
         files.forEach(file => store.put(file));
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
@@ -52,8 +51,8 @@ const getFilesFromDB = async () => {
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, 'readonly');
         const request = tx.objectStore(STORE_NAME).getAll();
-        tx.oncomplete = () => resolve(request.result);
-        tx.onerror = () => reject(tx.error);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
     });
 };
 
@@ -93,43 +92,30 @@ export default function App() {
     const peerConnections = useRef(new Map());
     const fileInputRef = useRef(null);
     
-    const processFiles = useCallback((files) => {
-        const videos = new Map();
-        const subtitles = new Map();
-
-        files.forEach(file => {
-            if (file.videoFile.type.startsWith('video/')) {
-                const baseName = file.videoFile.name.substring(0, file.videoFile.name.lastIndexOf('.'));
-                videos.set(baseName, file.videoFile);
-                if(file.subtitleFile) {
-                    const subBaseName = file.subtitleFile.name.substring(0, file.subtitleFile.name.lastIndexOf('.'));
-                    subtitles.set(subBaseName, file.subtitleFile);
-                }
-            }
-        });
-
+    const processAndSetMedia = useCallback((mediaItems) => {
         const newMedia = [];
-        for (const [baseName, videoFile] of videos.entries()) {
-            const id = `${videoFile.name}-${videoFile.lastModified}`;
-            const subtitleFile = subtitles.get(baseName) || null;
-            const newItem = { id, videoFile, subtitleFile, tags: [] };
-            fetchMetadata(newItem);
-            newMedia.push(newItem);
-        }
+        mediaItems.forEach(item => {
+            fetchMetadata(item);
+            newMedia.push(item);
+        });
         setMediaLibrary(newMedia);
     }, []);
-
+    
     // Load media from DB on startup
     useEffect(() => {
         const loadFromDB = async () => {
-            const files = await getFilesFromDB();
-            if (files && files.length > 0) {
-                processFiles(files);
+            try {
+                const files = await getFilesFromDB();
+                if (files && files.length > 0) {
+                    processAndSetMedia(files);
+                }
+            } catch (error) {
+                console.error("Could not load files from database:", error);
             }
             setIsLoading(false);
         };
         loadFromDB();
-    }, [processFiles]);
+    }, [processAndSetMedia]);
 
     // --- Firebase Initialization ---
     useEffect(() => {
@@ -258,15 +244,19 @@ export default function App() {
             }
         });
 
-        const filesToSave = [];
+        const newMediaItems = [];
         for (const [baseName, videoFile] of videos.entries()) {
             const id = `${videoFile.name}-${videoFile.lastModified}`;
             const subtitleFile = subtitles.get(baseName) || null;
-            filesToSave.push({ id, videoFile, subtitleFile });
+            newMediaItems.push({ id, videoFile, subtitleFile, tags: [] });
         }
         
-        saveFilesToDB(filesToSave).then(() => {
-            processFiles(filesToSave);
+        // Update UI immediately
+        processAndSetMedia(newMediaItems);
+        
+        // Save to DB in the background
+        saveFilesToDB(newMediaItems).catch(error => {
+            console.error("Failed to save files to DB:", error);
         });
     };
 
@@ -336,7 +326,7 @@ export default function App() {
                     <option value="year-desc">Year (Newest)</option>
                 </select>
                 <button onClick={() => fileInputRef.current.click()} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
-                    <Upload size={20} /> Select Folder
+                    <Upload size={20} /> Select Files
                 </button>
             </div>
         </header>
@@ -573,7 +563,7 @@ export default function App() {
 
     return (
         <div className="bg-gray-900 min-h-screen text-white font-sans">
-            <input ref={fileInputRef} type="file" multiple webkitdirectory="" directory="" onChange={handleFileUpload} className="hidden" />
+            <input ref={fileInputRef} type="file" multiple onChange={handleFileUpload} className="hidden" />
             <Header />
             <main className="p-8">
                 <ApiKeyWarning />
@@ -587,7 +577,7 @@ export default function App() {
                     <div className="text-center py-20">
                         <h2 className="text-2xl text-gray-400">Your media library is empty.</h2>
                         <button onClick={() => fileInputRef.current.click()} className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex items-center gap-2 transition-colors mx-auto">
-                            <Upload size={20} /> Click here to select a folder
+                            <Upload size={20} /> Click here to select files
                         </button>
                     </div>
                 )}
