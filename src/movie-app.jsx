@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
 import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } from 'firebase/firestore';
-import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle } from 'lucide-react';
+import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle, Volume2, Volume1, VolumeX } from 'lucide-react';
 
 // --- Configuration ---
 // Reads the keys directly from the config.js file loaded in the browser.
@@ -266,7 +266,14 @@ export default function App() {
     const handleJoinPrompt = () => {
         const partyId = prompt("Enter Watch Party ID:");
         if (partyId) {
-            joinWatchParty(partyId.toUpperCase());
+            // Find a media item to associate with the party. This is a simplification.
+            // In a real app, you'd fetch the media info from the party document.
+            if(mediaLibrary.length > 0) {
+                 setSelectedMedia(mediaLibrary[0]);
+                 joinWatchParty(partyId.toUpperCase());
+            } else {
+                alert("Please upload your media library before joining a party.");
+            }
         }
     };
 
@@ -292,6 +299,7 @@ export default function App() {
                 />
             </div>
             <div className="flex items-center gap-4">
+                <button onClick={handleJoinPrompt} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg" disabled={!isFirebaseReady}>Join Party</button>
                 <select
                     className="bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
                     value={sortOption}
@@ -387,7 +395,6 @@ export default function App() {
                         <div className="flex gap-4 mt-8">
                             <button onClick={() => { setIsDetailView(false); setIsPlayerView(true); }} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1">Play</button>
                             <button onClick={createWatchParty} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Create Watch Party</button>
-                            <button onClick={handleJoinPrompt} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Join Party</button>
                         </div>
                     </div>
                 </div>
@@ -398,9 +405,10 @@ export default function App() {
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const playerContainerRef = useRef(null);
-        const [isPlaying, setIsPlaying] = useState(false);
+        const [isPlaying, setIsPlaying] = useState(true); // Start playing by default
         const [progress, setProgress] = useState(0);
         const [duration, setDuration] = useState(0);
+        const [volume, setVolume] = useState(1);
         const [isSettingsOpen, setIsSettingsOpen] = useState(false);
         const [subtitleSettings, setSubtitleSettings] = useState({ color: '#FFFFFF', size: 24, background: 'rgba(0,0,0,0.5)' });
         const [partyState, setPartyState] = useState(null);
@@ -418,13 +426,10 @@ export default function App() {
         // Effect to handle playing the video when the component loads
         useEffect(() => {
             if (videoRef.current && videoSrc) {
-                const playPromise = videoRef.current.play();
-                if (playPromise !== undefined) {
-                    playPromise.catch(error => {
-                        console.log("Auto-play was prevented. User must interact to play.", error);
-                        setIsPlaying(false);
-                    });
-                }
+                videoRef.current.play().catch(error => {
+                    console.log("Auto-play was prevented. User must interact to play.", error);
+                    setIsPlaying(false);
+                });
             }
         }, [videoSrc]);
 
@@ -464,30 +469,42 @@ export default function App() {
         }, [partyState, watchParty.isHost]);
 
 
-        const togglePlay = () => {
+        const togglePlay = useCallback(() => {
             if (!videoRef.current) return;
             if (videoRef.current.paused) {
                 videoRef.current.play();
             } else {
                 videoRef.current.pause();
             }
-        };
+        }, []);
 
-        const handleTimeUpdate = () => {
+        const handleTimeUpdate = useCallback(() => {
             if (!videoRef.current) return;
             setProgress(videoRef.current.currentTime);
             if(watchParty.isHost && Math.abs(videoRef.current.currentTime - (partyState?.currentTime || 0)) > 5) {
                 updatePartyState({ currentTime: videoRef.current.currentTime });
             }
-        };
+        }, [partyState, updatePartyState, watchParty.isHost]);
 
         const handleSeek = (e) => {
             if (watchParty.id && !watchParty.isHost) return;
-            const seekTime = (e.nativeEvent.offsetX / e.target.clientWidth) * duration;
+            const progressBar = e.currentTarget;
+            const rect = progressBar.getBoundingClientRect();
+            const offsetX = e.clientX - rect.left;
+            const seekTime = (offsetX / rect.width) * duration;
             videoRef.current.currentTime = seekTime;
+            setProgress(seekTime); // Immediately update UI
             updatePartyState({ currentTime: seekTime });
         };
         
+        const handleVolumeChange = (e) => {
+            const newVolume = parseFloat(e.target.value);
+            if (videoRef.current) {
+                videoRef.current.volume = newVolume;
+            }
+            setVolume(newVolume);
+        };
+
         const toggleFullScreen = () => {
             if (!isFullScreenSupported) return;
             try {
@@ -496,34 +513,56 @@ export default function App() {
                 } else {
                     document.exitFullscreen();
                 }
-                setIsFullScreen(!!document.fullscreenElement);
             } catch (error) {
                 console.error("Fullscreen request failed:", error);
             }
         };
 
         useEffect(() => {
+            const handleFullScreenChange = () => setIsFullScreen(!!document.fullscreenElement);
+            document.addEventListener('fullscreenchange', handleFullScreenChange);
+            return () => document.removeEventListener('fullscreenchange', handleFullScreenChange);
+        }, []);
+        
+        useEffect(() => {
             const vid = videoRef.current;
             if (!vid) return;
 
-            const onPlay = () => { setIsPlaying(true); if (watchParty.isHost) updatePartyState({ isPlaying: true }); };
-            const onPause = () => { setIsPlaying(false); if (watchParty.isHost) updatePartyState({ isPlaying: false }); };
+            const onPlay = () => setIsPlaying(true);
+            const onPause = () => setIsPlaying(false);
             const onLoadedMetadata = () => setDuration(vid.duration);
-
+            
+            // Centralized event listener setup
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
             vid.addEventListener('timeupdate', handleTimeUpdate);
             vid.addEventListener('loadedmetadata', onLoadedMetadata);
+
+            // Host sync listeners
+            if (watchParty.isHost) {
+                vid.addEventListener('play', () => updatePartyState({ isPlaying: true }));
+                vid.addEventListener('pause', () => updatePartyState({ isPlaying: false }));
+            }
 
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
                 vid.removeEventListener('timeupdate', handleTimeUpdate);
                 vid.removeEventListener('loadedmetadata', onLoadedMetadata);
+                if (watchParty.isHost) {
+                    vid.removeEventListener('play', () => updatePartyState({ isPlaying: true }));
+                    vid.removeEventListener('pause', () => updatePartyState({ isPlaying: false }));
+                }
             };
-        }, [updatePartyState, watchParty.isHost]);
+        }, [handleTimeUpdate, updatePartyState, watchParty.isHost]);
 
         if (!selectedMedia) return null;
+        
+        const VolumeIcon = () => {
+            if (volume === 0) return <VolumeX size={24} />;
+            if (volume < 0.5) return <Volume1 size={24} />;
+            return <Volume2 size={24} />;
+        };
 
         return (
             <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
@@ -531,21 +570,34 @@ export default function App() {
                     <source src={videoSrc} type={selectedMedia.videoFile.type} />
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
-                <div className="absolute inset-0">
-                    <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/70 to-transparent flex justify-between items-center">
+                <div className="absolute inset-0 group">
+                    <div className="absolute top-0 left-0 right-0 p-4 bg-gradient-to-b from-black/70 to-transparent flex justify-between items-center opacity-0 group-hover:opacity-100 transition-opacity duration-300">
                          <div>
                             <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500"><ChevronsLeft size={32} /></button>
                             <span className="text-white text-xl ml-4">{metadataCache[selectedMedia.id]?.Title || '...'}</span>
                          </div>
                          {watchParty.id && <div className="text-white bg-red-600 px-3 py-1 rounded-md">Party ID: {watchParty.id}</div>}
                     </div>
-                    <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent">
-                        <div className={`w-full h-1.5 bg-gray-600 ${watchParty.id && !watchParty.isHost ? 'cursor-not-allowed' : 'cursor-pointer'}`} onClick={handleSeek}>
-                            <div className="h-full bg-red-500" style={{ width: `${(progress / duration) * 100}%` }}></div>
+                    <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
+                        <div className="w-full h-1.5 bg-gray-600/50 group/progress relative cursor-pointer" onClick={handleSeek}>
+                            <div className="absolute top-0 left-0 h-full bg-red-500" style={{ width: `${(progress / duration) * 100}%` }}></div>
+                            <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-[5px] opacity-0 group-hover/progress:opacity-100" style={{ left: `calc(${(progress / duration) * 100}% - 8px)` }}></div>
                         </div>
                         <div className="flex items-center justify-between mt-2">
                             <div className="flex items-center gap-4">
                                 <button onClick={togglePlay} className="text-white" disabled={watchParty.id && !watchParty.isHost}>{isPlaying ? <Pause size={28}/> : <Play size={28}/>}</button>
+                                <div className="flex items-center gap-2 group/volume">
+                                    <button onClick={() => setVolume(v => v > 0 ? 0 : 1)} className="text-white"><VolumeIcon /></button>
+                                    <input 
+                                       type="range" 
+                                       min="0" 
+                                       max="1" 
+                                       step="0.05" 
+                                       value={volume} 
+                                       onChange={handleVolumeChange}
+                                       className="w-0 group-hover/volume:w-24 transition-all duration-300"
+                                    />
+                                </div>
                             </div>
                             <div className="flex items-center gap-4">
                                 <button onClick={() => setIsSettingsOpen(s => !s)} className="text-white"><Settings size={24}/></button>
@@ -596,3 +648,4 @@ export default function App() {
         </div>
     );
 }
+
