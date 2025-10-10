@@ -403,28 +403,43 @@ export default function App() {
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const [partyInfo, setPartyInfo] = useState(null);
-        const [videoSrc, setVideoSrc] = useState(null);
-        const [subtitleSrc, setSubtitleSrc] = useState(null);
 
         const isGuest = watchParty.id && !watchParty.isHost;
 
         useEffect(() => {
+            const videoElement = videoRef.current;
+            if (!videoElement) return;
+
             let videoUrl, subtitleUrl;
+
             if ((watchParty.isHost || !watchParty.id) && selectedMedia?.videoFile) {
                 videoUrl = URL.createObjectURL(selectedMedia.videoFile);
-                setVideoSrc(videoUrl);
+                videoElement.src = videoUrl;
+
+                // Clear existing text tracks
+                Array.from(videoElement.textTracks).forEach(track => {
+                    track.mode = 'disabled';
+                });
+
                 if (selectedMedia.subtitleFile) {
                     subtitleUrl = URL.createObjectURL(selectedMedia.subtitleFile);
-                    setSubtitleSrc(subtitleUrl);
+                    const track = document.createElement('track');
+                    track.kind = 'subtitles';
+                    track.label = 'English';
+                    track.srclang = 'en';
+                    track.src = subtitleUrl;
+                    track.default = true;
+                    videoElement.appendChild(track);
+                    track.mode = 'showing';
                 }
             }
-
+            
             return () => {
                 if (videoUrl) URL.revokeObjectURL(videoUrl);
                 if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
             };
         }, [selectedMedia, watchParty.isHost, watchParty.id]);
-        
+
         useEffect(() => {
             if (isGuest) {
                 // Guest logic...
@@ -443,12 +458,7 @@ export default function App() {
                 <div className="absolute top-4 text-center text-white text-xl ml-4 bg-black/30 p-2 rounded-lg">{partyTitle || 'Loading...'}</div>
                 {watchParty.id && <div className="absolute top-4 right-4 text-white bg-red-600 px-3 py-1 rounded-md z-50">Party ID: {watchParty.id}</div>}
 
-                {videoSrc && (
-                    <video ref={videoRef} key={videoSrc} className="w-full h-full" crossOrigin="anonymous" playsInline controls autoPlay>
-                        <source src={videoSrc} type={selectedMedia.videoFile.type} />
-                        {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
-                    </video>
-                )}
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" playsInline controls autoPlay />
             </div>
         );
     };
