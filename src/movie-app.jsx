@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from 'firebase/auth';
-import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp, collection, addDoc, getDoc } from 'firebase/firestore';
+import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp, collection, addDoc, getDoc, deleteDoc } from 'firebase/firestore';
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle, Volume2, Volume1, VolumeX } from 'lucide-react';
 
 // --- Configuration ---
@@ -251,10 +251,7 @@ export default function App() {
             newMediaItems.push({ id, videoFile, subtitleFile, tags: [] });
         }
         
-        // Update UI immediately
         processAndSetMedia(newMediaItems);
-        
-        // Save to DB in the background
         saveFilesToDB(newMediaItems).catch(error => {
             console.error("Failed to save files to DB:", error);
         });
@@ -302,7 +299,11 @@ export default function App() {
         if (partyId) joinWatchParty(partyId.toUpperCase());
     };
 
-    const leaveWatchParty = () => {
+    const leaveWatchParty = async () => {
+        if (watchParty.id && !watchParty.isHost && db && userId) {
+            const guestRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id, "guests", userId);
+            await deleteDoc(guestRef);
+        }
         peerConnections.current.forEach(pc => pc.close());
         peerConnections.current.clear();
         setWatchParty({ id: null, isHost: false });
@@ -372,7 +373,7 @@ export default function App() {
             <div className="fixed inset-0 bg-black/80 backdrop-blur-lg z-30 flex items-center justify-center p-4" onClick={() => setIsDetailView(false)}>
                 <div className="bg-gray-900 rounded-xl max-w-4xl w-full flex gap-8 p-8 relative overflow-hidden" onClick={e => e.stopPropagation()}>
                     <button onClick={() => setIsDetailView(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white"><X size={28} /></button>
-                    <img src={poster} alt={title} className="w-1/3 rounded-lg shadow-2xl" />
+                    <img src={poster} alt={title} className="w-full h-auto object-cover rounded-lg shadow-2xl" />
                     <div className="w-2/3 flex flex-col">
                         <span className="text-red-500 font-semibold flex items-center gap-2">{metadata.Type === 'series' ? <Tv /> : <Film />} {metadata.Type?.toUpperCase()}</span>
                         <h2 className="text-4xl font-bold text-white mt-2">{title}</h2>
@@ -403,51 +404,144 @@ export default function App() {
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const [partyInfo, setPartyInfo] = useState(null);
-
+        const [videoUrl, setVideoUrl] = useState('');
+        const [subtitleUrl, setSubtitleUrl] = useState('');
+    
         const isGuest = watchParty.id && !watchParty.isHost;
-
+    
         useEffect(() => {
-            const videoElement = videoRef.current;
-            if (!videoElement) return;
-
-            let videoUrl, subtitleUrl;
-
             if ((watchParty.isHost || !watchParty.id) && selectedMedia?.videoFile) {
-                videoUrl = URL.createObjectURL(selectedMedia.videoFile);
-                videoElement.src = videoUrl;
-
-                // Clear existing text tracks
-                Array.from(videoElement.textTracks).forEach(track => {
-                    track.mode = 'disabled';
-                });
-
+                const newVideoUrl = URL.createObjectURL(selectedMedia.videoFile);
+                setVideoUrl(newVideoUrl);
+    
+                let newSubtitleUrl;
                 if (selectedMedia.subtitleFile) {
-                    subtitleUrl = URL.createObjectURL(selectedMedia.subtitleFile);
-                    const track = document.createElement('track');
-                    track.kind = 'subtitles';
-                    track.label = 'English';
-                    track.srclang = 'en';
-                    track.src = subtitleUrl;
-                    track.default = true;
-                    videoElement.appendChild(track);
-                    track.mode = 'showing';
+                    newSubtitleUrl = URL.createObjectURL(selectedMedia.subtitleFile);
+                    setSubtitleUrl(newSubtitleUrl);
                 }
+    
+                return () => {
+                    URL.revokeObjectURL(newVideoUrl);
+                    if (newSubtitleUrl) {
+                        URL.revokeObjectURL(newSubtitleUrl);
+                    }
+                };
             }
-            
-            return () => {
-                if (videoUrl) URL.revokeObjectURL(videoUrl);
-                if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
-            };
-        }, [selectedMedia, watchParty.isHost, watchParty.id]);
-
+        }, [selectedMedia]); 
+    
+        // Host: Listen for guests and create peer connections
         useEffect(() => {
-            if (isGuest) {
-                // Guest logic...
-            }
-        }, [isGuest]);
+            if (!watchParty.isHost || !db || !videoRef.current) return;
+    
+            const readyToStream = () => {
+                const videoElement = videoRef.current;
+                if (!videoElement || videoElement.readyState < 2) { // HAVE_CURRENT_DATA
+                    return false;
+                }
+                const stream = videoElement.captureStream();
+                if (!stream || stream.getTracks().length === 0) {
+                    return false;
+                }
+                return stream;
+            };
+    
+            const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
+            const guestsRef = collection(partyRef, 'guests');
+    
+            const unsubscribe = onSnapshot(guestsRef, (snapshot) => {
+                snapshot.docChanges().forEach(async (change) => {
+                    if (change.type === 'added') {
+                        const guestId = change.doc.id;
+                        const guestData = change.doc.data();
+                        
+                        if (guestData.offer && !peerConnections.current.has(guestId)) {
+                            const stream = readyToStream();
+                            if (!stream) {
+                                console.warn("Host player not ready to stream.");
+                                return;
+                            }
+    
+                            const pc = new RTCPeerConnection(peerConnectionConfig);
+                            peerConnections.current.set(guestId, pc);
+                            
+                            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+        
+                            await pc.setRemoteDescription(new RTCSessionDescription(guestData.offer));
+                            const answer = await pc.createAnswer();
+                            await pc.setLocalDescription(answer);
+        
+                            await updateDoc(change.doc.ref, { answer });
+        
+                            pc.onicecandidate = (event) => {
+                                if (event.candidate) {
+                                    addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
+                                }
+                            };
+                        }
+                    }
+                });
+            });
+    
+            return () => unsubscribe();
+        }, [watchParty.isHost, db, videoRef.current]);
+    
+        // Guest: Create offer and set up peer connection
+        useEffect(() => {
+            if (!isGuest || !db) return;
+        
+            const pc = new RTCPeerConnection(peerConnectionConfig);
+            peerConnections.current.set(userId, pc);
+        
+            pc.ontrack = (event) => {
+                if (videoRef.current) {
+                    videoRef.current.srcObject = event.streams[0];
+                }
+            };
+        
+            const setupConnection = async () => {
+                const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
+                const partySnap = await getDoc(partyRef);
+                if (!partySnap.exists()) {
+                    alert("Watch party not found!");
+                    leaveWatchParty();
+                    return;
+                }
+                setPartyInfo(partySnap.data());
+
+                const guestRef = doc(partyRef, 'guests', userId);
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+    
+                await setDoc(guestRef, { offer });
+    
+                const unsubAnswer = onSnapshot(guestRef, async (snapshot) => {
+                    const data = snapshot.data();
+                    if (!pc.currentRemoteDescription && data?.answer) {
+                        await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
+                    }
+                });
+    
+                const hostCandidatesRef = collection(guestRef, 'hostCandidates');
+                const unsubHostCandidates = onSnapshot(hostCandidatesRef, (snapshot) => {
+                    snapshot.docChanges().forEach((change) => {
+                        if (change.type === 'added') {
+                            pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
+                        }
+                    });
+                });
+    
+                return () => {
+                    unsubAnswer();
+                    unsubHostCandidates();
+                };
+            };
+            
+            setupConnection();
+    
+        }, [isGuest, db, userId]);
         
         const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
-
+    
         return (
             <div className="fixed inset-0 bg-black z-40 flex items-center justify-center">
                  <div className="absolute top-4 left-4 z-50">
@@ -457,8 +551,23 @@ export default function App() {
                 </div>
                 <div className="absolute top-4 text-center text-white text-xl ml-4 bg-black/30 p-2 rounded-lg">{partyTitle || 'Loading...'}</div>
                 {watchParty.id && <div className="absolute top-4 right-4 text-white bg-red-600 px-3 py-1 rounded-md z-50">Party ID: {watchParty.id}</div>}
-
-                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" playsInline controls autoPlay />
+    
+                <video 
+                    ref={videoRef} 
+                    key={videoUrl} // Re-mount video element when src changes
+                    className="w-full h-full" 
+                    crossOrigin="anonymous" 
+                    playsInline 
+                    controls={!isGuest} // Only host/solo gets controls
+                    autoPlay 
+                >
+                    {(watchParty.isHost || !watchParty.id) && videoUrl && (
+                        <>
+                            <source src={videoUrl} type={selectedMedia.videoFile.type} />
+                            {subtitleUrl && <track label="English" kind="subtitles" srcLang="en" src={subtitleUrl} default />}
+                        </>
+                    )}
+                </video>
             </div>
         );
     };
