@@ -280,6 +280,7 @@ export default function App() {
                 mediaName: metadataCache[selectedMedia.id]?.Title || cleanMediaName(selectedMedia.videoFile.name),
                 createdAt: serverTimestamp(),
             });
+
             setWatchParty({ id: partyId, isHost: true });
             setIsDetailView(false);
             setIsPlayerView(true);
@@ -401,33 +402,11 @@ export default function App() {
         );
     };
     
-    const VideoPlayer = () => {
+    const VideoPlayer = ({ media }) => {
         const videoRef = useRef(null);
         const [partyInfo, setPartyInfo] = useState(null);
-        const [videoUrl, setVideoUrl] = useState('');
-        const [subtitleUrl, setSubtitleUrl] = useState('');
     
         const isGuest = watchParty.id && !watchParty.isHost;
-    
-        useEffect(() => {
-            if ((watchParty.isHost || !watchParty.id) && selectedMedia?.videoFile) {
-                const newVideoUrl = URL.createObjectURL(selectedMedia.videoFile);
-                setVideoUrl(newVideoUrl);
-    
-                let newSubtitleUrl;
-                if (selectedMedia.subtitleFile) {
-                    newSubtitleUrl = URL.createObjectURL(selectedMedia.subtitleFile);
-                    setSubtitleUrl(newSubtitleUrl);
-                }
-    
-                return () => {
-                    URL.revokeObjectURL(newVideoUrl);
-                    if (newSubtitleUrl) {
-                        URL.revokeObjectURL(newSubtitleUrl);
-                    }
-                };
-            }
-        }, [selectedMedia]); 
     
         // Host: Listen for guests and create peer connections
         useEffect(() => {
@@ -435,13 +414,9 @@ export default function App() {
     
             const readyToStream = () => {
                 const videoElement = videoRef.current;
-                if (!videoElement || videoElement.readyState < 2) { // HAVE_CURRENT_DATA
-                    return false;
-                }
+                if (!videoElement || videoElement.readyState < 2) return false;
                 const stream = videoElement.captureStream();
-                if (!stream || stream.getTracks().length === 0) {
-                    return false;
-                }
+                if (!stream || stream.getTracks().length === 0) return false;
                 return stream;
             };
     
@@ -456,10 +431,7 @@ export default function App() {
                         
                         if (guestData.offer && !peerConnections.current.has(guestId)) {
                             const stream = readyToStream();
-                            if (!stream) {
-                                console.warn("Host player not ready to stream.");
-                                return;
-                            }
+                            if (!stream) return console.warn("Host player not ready.");
     
                             const pc = new RTCPeerConnection(peerConnectionConfig);
                             peerConnections.current.set(guestId, pc);
@@ -473,9 +445,7 @@ export default function App() {
                             await updateDoc(change.doc.ref, { answer });
         
                             pc.onicecandidate = (event) => {
-                                if (event.candidate) {
-                                    addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
-                                }
+                                if (event.candidate) addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
                             };
                         }
                     }
@@ -483,7 +453,7 @@ export default function App() {
             });
     
             return () => unsubscribe();
-        }, [watchParty.isHost, db, videoRef.current]);
+        }, [watchParty.isHost, db]);
     
         // Guest: Create offer and set up peer connection
         useEffect(() => {
@@ -493,21 +463,15 @@ export default function App() {
             peerConnections.current.set(userId, pc);
         
             pc.ontrack = (event) => {
-                if (videoRef.current) {
-                    videoRef.current.srcObject = event.streams[0];
-                }
+                if (videoRef.current) videoRef.current.srcObject = event.streams[0];
             };
         
             const setupConnection = async () => {
                 const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
                 const partySnap = await getDoc(partyRef);
-                if (!partySnap.exists()) {
-                    alert("Watch party not found!");
-                    leaveWatchParty();
-                    return;
-                }
+                if (!partySnap.exists()) return alert("Watch party not found!");
+                
                 setPartyInfo(partySnap.data());
-
                 const guestRef = doc(partyRef, 'guests', userId);
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
@@ -524,28 +488,56 @@ export default function App() {
                 const hostCandidatesRef = collection(guestRef, 'hostCandidates');
                 const unsubHostCandidates = onSnapshot(hostCandidatesRef, (snapshot) => {
                     snapshot.docChanges().forEach((change) => {
-                        if (change.type === 'added') {
-                            pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                        }
+                        if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
                     });
                 });
     
-                return () => {
-                    unsubAnswer();
-                    unsubHostCandidates();
-                };
+                return () => { unsubAnswer(); unsubHostCandidates(); };
             };
             
             setupConnection();
     
         }, [isGuest, db, userId]);
         
-        const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
+        // This effect handles loading the video source for the host or solo viewer.
+        useEffect(() => {
+            if (videoRef.current && (watchParty.isHost || !watchParty.id) && media?.videoFile) {
+                const videoUrl = URL.createObjectURL(media.videoFile);
+                videoRef.current.src = videoUrl;
+
+                // Clear existing text tracks before adding new one
+                Array.from(videoRef.current.textTracks).forEach(track => {
+                    track.mode = 'disabled';
+                    // You might need to remove the track element from the DOM as well if it was added manually.
+                });
+
+                if (media.subtitleFile) {
+                    const subtitleUrl = URL.createObjectURL(media.subtitleFile);
+                    const trackElement = document.createElement('track');
+                    trackElement.kind = 'subtitles';
+                    trackElement.label = 'English';
+                    trackElement.srclang = 'en';
+                    trackElement.src = subtitleUrl;
+                    trackElement.default = true;
+                    videoRef.current.appendChild(trackElement);
+                    trackElement.track.mode = 'showing';
+                    
+                    return () => {
+                        URL.revokeObjectURL(videoUrl);
+                        URL.revokeObjectURL(subtitleUrl);
+                    }
+                }
+
+                return () => URL.revokeObjectURL(videoUrl);
+            }
+        }, [media, watchParty.isHost]);
+        
+        const partyTitle = partyInfo?.mediaName || metadataCache[media?.id]?.Title;
     
         return (
             <div className="fixed inset-0 bg-black z-40 flex items-center justify-center">
                  <div className="absolute top-4 left-4 z-50">
-                     <button onClick={() => { setIsPlayerView(false); leaveWatchParty(); }} className="text-white hover:text-red-500 bg-black/30 rounded-full p-2">
+                     <button onClick={leaveWatchParty} className="text-white hover:text-red-500 bg-black/30 rounded-full p-2">
                         <ChevronsLeft size={32} />
                      </button>
                 </div>
@@ -554,20 +546,12 @@ export default function App() {
     
                 <video 
                     ref={videoRef} 
-                    key={videoUrl} // Re-mount video element when src changes
                     className="w-full h-full" 
                     crossOrigin="anonymous" 
                     playsInline 
                     controls={!isGuest} // Only host/solo gets controls
                     autoPlay 
-                >
-                    {(watchParty.isHost || !watchParty.id) && videoUrl && (
-                        <>
-                            <source src={videoUrl} type={selectedMedia.videoFile.type} />
-                            {subtitleUrl && <track label="English" kind="subtitles" srcLang="en" src={subtitleUrl} default />}
-                        </>
-                    )}
-                </video>
+                />
             </div>
         );
     };
@@ -594,7 +578,7 @@ export default function App() {
                 )}
             </main>
             {isDetailView && <DetailView />}
-            {isPlayerView && <VideoPlayer />}
+            {isPlayerView && <VideoPlayer media={selectedMedia} />}
         </div>
     );
 }
