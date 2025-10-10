@@ -402,33 +402,37 @@ export default function App() {
     
     const VideoPlayer = () => {
         const videoRef = useRef(null);
-        const [stream, setStream] = useState(null);
         const [partyInfo, setPartyInfo] = useState(null);
-        const [sources, setSources] = useState({ video: null, subtitle: null });
 
         const isGuest = watchParty.id && !watchParty.isHost;
 
-        useEffect(() => {
-            let videoUrl, subtitleUrl;
+        const videoSrc = useMemo(() => {
             if ((watchParty.isHost || !watchParty.id) && selectedMedia?.videoFile) {
-                videoUrl = URL.createObjectURL(selectedMedia.videoFile);
-                if (selectedMedia.subtitleFile) {
-                    subtitleUrl = URL.createObjectURL(selectedMedia.subtitleFile);
-                }
-                setSources({ video: videoUrl, subtitle: subtitleUrl });
+                return URL.createObjectURL(selectedMedia.videoFile);
             }
+            return null;
+        }, [selectedMedia, watchParty.isHost, watchParty.id]);
 
-            return () => {
-                if (videoUrl) URL.revokeObjectURL(videoUrl);
-                if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
-            };
-        }, [selectedMedia, watchParty.isHost]);
-        
+        const subtitleSrc = useMemo(() => {
+            if ((watchParty.isHost || !watchParty.id) && selectedMedia?.subtitleFile) {
+                return URL.createObjectURL(selectedMedia.subtitleFile);
+            }
+            return null;
+        }, [selectedMedia, watchParty.isHost, watchParty.id]);
+
         useEffect(() => {
             if (isGuest) {
                 // Guest logic...
             }
         }, [isGuest]);
+        
+        useEffect(() => {
+            // Cleanup object URLs when component unmounts or sources change
+            return () => {
+                if (videoSrc) URL.revokeObjectURL(videoSrc);
+                if (subtitleSrc) URL.revokeObjectURL(subtitleSrc);
+            };
+        }, [videoSrc, subtitleSrc]);
         
         const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
 
@@ -442,9 +446,9 @@ export default function App() {
                 <div className="absolute top-4 text-center text-white text-xl ml-4 bg-black/30 p-2 rounded-lg">{partyTitle || 'Loading...'}</div>
                 {watchParty.id && <div className="absolute top-4 right-4 text-white bg-red-600 px-3 py-1 rounded-md z-50">Party ID: {watchParty.id}</div>}
 
-                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" playsInline controls autoPlay>
-                    {sources.video && <source src={sources.video} type={selectedMedia.videoFile.type} />}
-                    {sources.subtitle && <track label="English" kind="subtitles" srcLang="en" src={sources.subtitle} default />}
+                <video ref={videoRef} key={videoSrc} className="w-full h-full" crossOrigin="anonymous" playsInline controls autoPlay>
+                    {videoSrc && <source src={videoSrc} type={selectedMedia.videoFile.type} />}
+                    {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
             </div>
         );
