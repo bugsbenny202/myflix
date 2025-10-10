@@ -374,7 +374,7 @@ export default function App() {
             <div className="fixed inset-0 bg-black/80 backdrop-blur-lg z-30 flex items-center justify-center p-4" onClick={() => setIsDetailView(false)}>
                 <div className="bg-gray-900 rounded-xl max-w-4xl w-full flex gap-8 p-8 relative overflow-hidden" onClick={e => e.stopPropagation()}>
                     <button onClick={() => setIsDetailView(false)} className="absolute top-4 right-4 text-gray-400 hover:text-white"><X size={28} /></button>
-                    <img src={poster} alt={title} className="w-full h-auto object-cover rounded-lg shadow-2xl" />
+                    <img src={poster} alt={title} className="w-1/3 rounded-lg shadow-2xl" />
                     <div className="w-2/3 flex flex-col">
                         <span className="text-red-500 font-semibold flex items-center gap-2">{metadata.Type === 'series' ? <Tv /> : <Film />} {metadata.Type?.toUpperCase()}</span>
                         <h2 className="text-4xl font-bold text-white mt-2">{title}</h2>
@@ -405,20 +405,35 @@ export default function App() {
     const VideoPlayer = ({ media }) => {
         const videoRef = useRef(null);
         const [partyInfo, setPartyInfo] = useState(null);
+        const pendingGuests = useRef(new Map());
     
         const isGuest = watchParty.id && !watchParty.isHost;
     
-        // Host: Listen for guests and create peer connections
-        useEffect(() => {
-            if (!watchParty.isHost || !db || !videoRef.current) return;
-    
-            const readyToStream = () => {
-                const videoElement = videoRef.current;
-                if (!videoElement || videoElement.readyState < 2) return false;
-                const stream = videoElement.captureStream();
-                if (!stream || stream.getTracks().length === 0) return false;
-                return stream;
+        const setupPeerConnectionForGuest = useCallback(async (guestId, guestData, guestDocRef) => {
+            const stream = videoRef.current?.captureStream();
+            if (!stream) return;
+
+            const pc = new RTCPeerConnection(peerConnectionConfig);
+            peerConnections.current.set(guestId, pc);
+
+            stream.getTracks().forEach(track => pc.addTrack(track, stream));
+
+            await pc.setRemoteDescription(new RTCSessionDescription(guestData.offer));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+
+            await updateDoc(guestDocRef, { answer });
+
+            pc.onicecandidate = (event) => {
+                if (event.candidate) {
+                    addDoc(collection(guestDocRef, 'hostCandidates'), event.candidate.toJSON());
+                }
             };
+        }, [videoRef]);
+
+        // Host: Listen for guests
+        useEffect(() => {
+            if (!watchParty.isHost || !db) return;
     
             const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
             const guestsRef = collection(partyRef, 'guests');
@@ -430,32 +445,21 @@ export default function App() {
                         const guestData = change.doc.data();
                         
                         if (guestData.offer && !peerConnections.current.has(guestId)) {
-                            const stream = readyToStream();
-                            if (!stream) return console.warn("Host player not ready.");
-    
-                            const pc = new RTCPeerConnection(peerConnectionConfig);
-                            peerConnections.current.set(guestId, pc);
-                            
-                            stream.getTracks().forEach(track => pc.addTrack(track, stream));
-        
-                            await pc.setRemoteDescription(new RTCSessionDescription(guestData.offer));
-                            const answer = await pc.createAnswer();
-                            await pc.setLocalDescription(answer);
-        
-                            await updateDoc(change.doc.ref, { answer });
-        
-                            pc.onicecandidate = (event) => {
-                                if (event.candidate) addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
-                            };
+                            // If player is ready, connect immediately. Otherwise, queue the guest.
+                            if (videoRef.current && videoRef.current.readyState >= 2) {
+                                setupPeerConnectionForGuest(guestId, guestData, change.doc.ref);
+                            } else {
+                                pendingGuests.current.set(guestId, { data: guestData, ref: change.doc.ref });
+                            }
                         }
                     }
                 });
             });
     
             return () => unsubscribe();
-        }, [watchParty.isHost, db]);
+        }, [watchParty.isHost, db, setupPeerConnectionForGuest]);
     
-        // Guest: Create offer and set up peer connection
+        // Guest: Create offer
         useEffect(() => {
             if (!isGuest || !db) return;
         
@@ -499,38 +503,48 @@ export default function App() {
     
         }, [isGuest, db, userId]);
         
-        // This effect handles loading the video source for the host or solo viewer.
+        // Load video source and handle host's readiness
         useEffect(() => {
-            if (videoRef.current && (watchParty.isHost || !watchParty.id) && media?.videoFile) {
-                const videoUrl = URL.createObjectURL(media.videoFile);
-                videoRef.current.src = videoUrl;
+            const videoElement = videoRef.current;
+            if (!videoElement) return;
 
-                // Clear existing text tracks before adding new one
-                Array.from(videoRef.current.textTracks).forEach(track => {
-                    track.mode = 'disabled';
-                    // You might need to remove the track element from the DOM as well if it was added manually.
-                });
+            let videoUrl, subtitleUrl;
 
+            const handleCanPlay = () => {
+                if (watchParty.isHost) {
+                    // Process any pending guests now that the player is ready
+                    pendingGuests.current.forEach((guest, guestId) => {
+                        setupPeerConnectionForGuest(guestId, guest.data, guest.ref);
+                    });
+                    pendingGuests.current.clear();
+                }
+            };
+            
+            if ((watchParty.isHost || !watchParty.id) && media?.videoFile) {
+                videoUrl = URL.createObjectURL(media.videoFile);
+                videoElement.src = videoUrl;
+                
                 if (media.subtitleFile) {
-                    const subtitleUrl = URL.createObjectURL(media.subtitleFile);
-                    const trackElement = document.createElement('track');
-                    trackElement.kind = 'subtitles';
-                    trackElement.label = 'English';
-                    trackElement.srclang = 'en';
-                    trackElement.src = subtitleUrl;
-                    trackElement.default = true;
-                    videoRef.current.appendChild(trackElement);
-                    trackElement.track.mode = 'showing';
-                    
-                    return () => {
-                        URL.revokeObjectURL(videoUrl);
-                        URL.revokeObjectURL(subtitleUrl);
-                    }
+                    subtitleUrl = URL.createObjectURL(media.subtitleFile);
+                    const track = document.createElement('track');
+                    track.kind = 'subtitles';
+                    track.label = 'English';
+                    track.srclang = 'en';
+                    track.src = subtitleUrl;
+                    track.default = true;
+                    videoElement.appendChild(track);
+                    track.mode = 'showing';
                 }
 
-                return () => URL.revokeObjectURL(videoUrl);
+                videoElement.addEventListener('canplay', handleCanPlay);
             }
-        }, [media, watchParty.isHost]);
+            
+            return () => {
+                if (videoElement) videoElement.removeEventListener('canplay', handleCanPlay);
+                if (videoUrl) URL.revokeObjectURL(videoUrl);
+                if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
+            };
+        }, [media, watchParty.isHost, setupPeerConnectionForGuest]);
         
         const partyTitle = partyInfo?.mediaName || metadataCache[media?.id]?.Title;
     
