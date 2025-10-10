@@ -18,44 +18,6 @@ const peerConnectionConfig = {
   ],
 };
 
-// --- IndexedDB Helpers for Persistence ---
-const DB_NAME = 'MyFlixDB';
-const DB_VERSION = 1;
-const STORE_NAME = 'fileStore';
-const KEY = 'directoryHandle';
-
-const openDB = () => {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(STORE_NAME);
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
-  });
-};
-
-const saveDirectoryHandle = async (handle) => {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readwrite');
-    tx.objectStore(STORE_NAME).put(handle, KEY);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-};
-
-const getDirectoryHandle = async () => {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE_NAME, 'readonly');
-    const request = tx.objectStore(STORE_NAME).get(KEY);
-    tx.oncomplete = () => resolve(request.result);
-    tx.onerror = () => reject(tx.error);
-  });
-};
-
-
 // --- Helper Functions ---
 const cleanMediaName = (name) => {
     return name
@@ -84,65 +46,12 @@ export default function App() {
     const [userId, setUserId] = useState(null);
     const [watchParty, setWatchParty] = useState({ id: null, isHost: false });
     const [isFirebaseReady, setIsFirebaseReady] = useState(false);
-    const [isLoading, setIsLoading] = useState(true);
+    const [isLoading, setIsLoading] = useState(false); // Initialize loading state
 
     const mainGridRef = useRef(null);
     const tagInputRef = useRef(null);
     const peerConnections = useRef(new Map());
-
-    // --- Media Library Loading Logic ---
-    const processDirectory = useCallback(async (dirHandle) => {
-        setIsLoading(true);
-        const newMedia = [];
-        const videos = new Map();
-        const subtitles = new Map();
-
-        for await (const entry of dirHandle.values()) {
-            if (entry.kind === 'file') {
-                const file = await entry.getFile();
-                if (file.type.startsWith('video/')) {
-                    const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
-                    videos.set(baseName, file);
-                } else if (file.name.endsWith('.vtt') || file.name.endsWith('.srt')) {
-                    const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
-                    subtitles.set(baseName, file);
-                }
-            }
-        }
-
-        for (const [baseName, videoFile] of videos.entries()) {
-            const id = `${videoFile.name}-${videoFile.lastModified}`;
-            const subtitleFile = subtitles.get(baseName) || null;
-            const newItem = { id, videoFile, subtitleFile, tags: [] };
-            fetchMetadata(newItem);
-            newMedia.push(newItem);
-        }
-
-        setMediaLibrary(newMedia);
-        setIsLoading(false);
-    }, []);
-
-    // --- Attempt to load saved directory on startup ---
-    useEffect(() => {
-        const loadSavedDirectory = async () => {
-            try {
-                const dirHandle = await getDirectoryHandle();
-                if (dirHandle) {
-                    if (await dirHandle.queryPermission({ mode: 'read' }) === 'granted') {
-                        await processDirectory(dirHandle);
-                    } else {
-                        setIsLoading(false); // No permission, stop loading
-                    }
-                } else {
-                    setIsLoading(false); // No saved handle
-                }
-            } catch (error) {
-                console.error("Error loading saved directory:", error);
-                setIsLoading(false);
-            }
-        };
-        loadSavedDirectory();
-    }, [processDirectory]);
+    const fileInputRef = useRef(null);
 
 
     // --- Firebase Initialization ---
@@ -258,14 +167,31 @@ export default function App() {
         }
     };
 
-    const handleSelectFolder = async () => {
-        try {
-            const dirHandle = await window.showDirectoryPicker();
-            await saveDirectoryHandle(dirHandle);
-            await processDirectory(dirHandle);
-        } catch (error) {
-            console.error("User cancelled folder selection or an error occurred:", error);
+    const handleFileUpload = (e) => {
+        const files = Array.from(e.target.files);
+        const videos = new Map();
+        const subtitles = new Map();
+
+        files.forEach(file => {
+            if (file.type.startsWith('video/')) {
+                const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+                videos.set(baseName, file);
+            } else if (file.name.endsWith('.vtt') || file.name.endsWith('.srt')) {
+                const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+                subtitles.set(baseName, file);
+            }
+        });
+
+        const newMedia = [];
+        for (const [baseName, videoFile] of videos.entries()) {
+            const id = `${videoFile.name}-${videoFile.lastModified}`;
+            const subtitleFile = subtitles.get(baseName) || null;
+            const newItem = { id, videoFile, subtitleFile, tags: [] };
+            fetchMetadata(newItem);
+            newMedia.push(newItem);
         }
+
+        setMediaLibrary(newMedia);
     };
 
     const handleMediaSelect = (media) => {
@@ -333,7 +259,7 @@ export default function App() {
                     <option value="year-asc">Year (Oldest)</option>
                     <option value="year-desc">Year (Newest)</option>
                 </select>
-                <button onClick={handleSelectFolder} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
+                <button onClick={() => fileInputRef.current.click()} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
                     <Upload size={20} /> Select Folder
                 </button>
             </div>
@@ -615,20 +541,19 @@ export default function App() {
 
     return (
         <div className="bg-gray-900 min-h-screen text-white font-sans">
+            <input ref={fileInputRef} type="file" multiple webkitdirectory="" directory="" onChange={handleFileUpload} className="hidden" />
             <Header />
             <main className="p-8">
                 <ApiKeyWarning />
                 <FirebaseWarning />
-                {isLoading ? (
-                     <div className="text-center py-20 text-gray-400">Loading your media library...</div>
-                ) : filteredMedia.length > 0 ? (
+                {filteredMedia.length > 0 ? (
                     <div ref={mainGridRef} className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6">
                         {filteredMedia.map((item, index) => <MediaItem key={item.id} item={item} isFocused={index === focusedIndex} />)}
                     </div>
                 ) : (
                     <div className="text-center py-20">
                         <h2 className="text-2xl text-gray-400">Your media library is empty.</h2>
-                        <button onClick={handleSelectFolder} className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex items-center gap-2 transition-colors mx-auto">
+                        <button onClick={() => fileInputRef.current.click()} className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex items-center gap-2 transition-colors mx-auto">
                             <Upload size={20} /> Click here to select a folder
                         </button>
                     </div>
