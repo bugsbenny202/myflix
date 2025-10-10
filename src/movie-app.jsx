@@ -18,15 +18,51 @@ const peerConnectionConfig = {
   ],
 };
 
+// --- IndexedDB Helpers for Persistence ---
+const DB_NAME = 'MyFlixDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'fileStore';
+const KEY = 'directoryHandle';
+
+const openDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(STORE_NAME);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+const saveDirectoryHandle = async (handle) => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(handle, KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
+const getDirectoryHandle = async () => {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_NAME, 'readonly');
+    const request = tx.objectStore(STORE_NAME).get(KEY);
+    tx.oncomplete = () => resolve(request.result);
+    tx.onerror = () => reject(tx.error);
+  });
+};
+
 
 // --- Helper Functions ---
 const cleanMediaName = (name) => {
-    // Tries to clean up a file name to get a searchable movie/series title.
     return name
-        .replace(/\.(mp4|mkv|avi|mov|srt|vtt)$/i, '') // Remove file extensions
-        .replace(/[\._]/g, ' ') // Replace dots and underscores with spaces
-        .replace(/\b(1080p|720p|4k|uhd|bluray|web-dl|x264|x265|aac|dts)\b/gi, '') // Remove quality tags
-        .replace(/\d{4}.*$/, '') // Remove year and everything after
+        .replace(/\.(mp4|mkv|avi|mov|srt|vtt)$/i, '')
+        .replace(/[\._]/g, ' ')
+        .replace(/\b(1080p|720p|4k|uhd|bluray|web-dl|x264|x265|aac|dts)\b/gi, '')
+        .replace(/\d{4}.*$/, '')
         .trim();
 };
 
@@ -48,11 +84,65 @@ export default function App() {
     const [userId, setUserId] = useState(null);
     const [watchParty, setWatchParty] = useState({ id: null, isHost: false });
     const [isFirebaseReady, setIsFirebaseReady] = useState(false);
+    const [isLoading, setIsLoading] = useState(true);
 
-    const fileInputRef = useRef(null);
     const mainGridRef = useRef(null);
     const tagInputRef = useRef(null);
     const peerConnections = useRef(new Map());
+
+    // --- Media Library Loading Logic ---
+    const processDirectory = useCallback(async (dirHandle) => {
+        setIsLoading(true);
+        const newMedia = [];
+        const videos = new Map();
+        const subtitles = new Map();
+
+        for await (const entry of dirHandle.values()) {
+            if (entry.kind === 'file') {
+                const file = await entry.getFile();
+                if (file.type.startsWith('video/')) {
+                    const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+                    videos.set(baseName, file);
+                } else if (file.name.endsWith('.vtt') || file.name.endsWith('.srt')) {
+                    const baseName = file.name.substring(0, file.name.lastIndexOf('.'));
+                    subtitles.set(baseName, file);
+                }
+            }
+        }
+
+        for (const [baseName, videoFile] of videos.entries()) {
+            const id = `${videoFile.name}-${videoFile.lastModified}`;
+            const subtitleFile = subtitles.get(baseName) || null;
+            const newItem = { id, videoFile, subtitleFile, tags: [] };
+            fetchMetadata(newItem);
+            newMedia.push(newItem);
+        }
+
+        setMediaLibrary(newMedia);
+        setIsLoading(false);
+    }, []);
+
+    // --- Attempt to load saved directory on startup ---
+    useEffect(() => {
+        const loadSavedDirectory = async () => {
+            try {
+                const dirHandle = await getDirectoryHandle();
+                if (dirHandle) {
+                    if (await dirHandle.queryPermission({ mode: 'read' }) === 'granted') {
+                        await processDirectory(dirHandle);
+                    } else {
+                        setIsLoading(false); // No permission, stop loading
+                    }
+                } else {
+                    setIsLoading(false); // No saved handle
+                }
+            } catch (error) {
+                console.error("Error loading saved directory:", error);
+                setIsLoading(false);
+            }
+        };
+        loadSavedDirectory();
+    }, [processDirectory]);
 
 
     // --- Firebase Initialization ---
@@ -60,7 +150,6 @@ export default function App() {
         if (!firebaseConfig.apiKey) {
             return;
         }
-
         const app = initializeApp(firebaseConfig);
         const firestore = getFirestore(app);
         const fireAuth = getAuth(app);
@@ -75,17 +164,11 @@ export default function App() {
                  console.error("Authentication failed:", error);
             }
         };
-
         authenticate();
-
         const unsubscribe = onAuthStateChanged(fireAuth, (user) => {
-            if (user) {
-                setUserId(user.uid);
-            } else {
-                setUserId(null);
-            }
+            if (user) setUserId(user.uid);
+            else setUserId(null);
         });
-
         return () => unsubscribe();
     }, []);
 
@@ -120,10 +203,8 @@ export default function App() {
     useEffect(() => {
         const handleKeyDown = (e) => {
             if (isDetailView || isPlayerView) return;
-
             const gridItems = mainGridRef.current?.children;
             if (!gridItems || gridItems.length === 0) return;
-            
             const gridComputedStyle = window.getComputedStyle(mainGridRef.current);
             const gridTemplateColumns = gridComputedStyle.getPropertyValue('grid-template-columns');
             const columns = gridTemplateColumns.split(' ').length;
@@ -140,50 +221,28 @@ export default function App() {
                     return;
                 default: return;
             }
-
             e.preventDefault();
             setFocusedIndex(newIndex);
             gridItems[newIndex]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
         };
-
-        const intervalId = setInterval(() => {
-            const gamepads = navigator.getGamepads();
-            if (gamepads[0]) {
-                const gp = gamepads[0];
-                if (gp.buttons[14].pressed) handleKeyDown({ key: 'ArrowLeft', preventDefault: () => {} });
-                if (gp.buttons[15].pressed) handleKeyDown({ key: 'ArrowRight', preventDefault: () => {} });
-                if (gp.buttons[12].pressed) handleKeyDown({ key: 'ArrowUp', preventDefault: () => {} });
-                if (gp.buttons[13].pressed) handleKeyDown({ key: 'ArrowDown', preventDefault: () => {} });
-                if (gp.buttons[0].pressed) handleKeyDown({ key: 'Enter', preventDefault: () => {} });
-            }
-        }, 150);
-
         window.addEventListener('keydown', handleKeyDown);
-        return () => {
-            window.removeEventListener('keydown', handleKeyDown);
-            clearInterval(intervalId);
-        };
+        return () => window.removeEventListener('keydown', handleKeyDown);
     }, [focusedIndex, filteredMedia, isDetailView, isPlayerView]);
 
 
     // --- Core Functions ---
     const fetchMetadata = async (item) => {
         if (metadataCache[item.id] || !TMDB_API_KEY) return;
-
         const title = cleanMediaName(item.videoFile.name);
         try {
             const searchResponse = await fetch(`https://api.themoviedb.org/3/search/movie?api_key=${TMDB_API_KEY}&query=${encodeURIComponent(title)}`);
             const searchData = await searchResponse.json();
             const movieResult = searchData.results?.[0];
-
             if (!movieResult) return;
-
             const detailsResponse = await fetch(`https://api.themoviedb.org/3/movie/${movieResult.id}?api_key=${TMDB_API_KEY}&append_to_response=release_dates`);
             const detailsData = await detailsResponse.json();
-
             const usRelease = detailsData.release_dates?.results?.find(r => r.iso_3166_1 === 'US');
             const rating = usRelease?.release_dates?.find(rd => rd.certification)?.certification || 'N/A';
-
             const normalizedData = {
                 Title: detailsData.title,
                 Year: detailsData.release_date ? detailsData.release_date.substring(0, 4) : 'N/A',
@@ -193,30 +252,20 @@ export default function App() {
                 Poster: detailsData.poster_path ? `${TMDB_IMAGE_BASE_URL}${detailsData.poster_path}` : 'https://placehold.co/300x450/1a1a1a/FFFFFF?text=No+Image',
                 Type: 'movie',
             };
-            
             setMetadataCache(prev => ({ ...prev, [item.id]: normalizedData }));
-
         } catch (error) {
             console.error("Failed to fetch TMDB metadata:", error);
         }
     };
 
-    const handleFileUpload = (e) => {
-        const files = Array.from(e.target.files);
-        const videos = files.filter(f => f.type.startsWith('video/'));
-        const subtitles = files.filter(f => f.name.endsWith('.vtt') || f.name.endsWith('.srt'));
-
-        const newMedia = videos.map(videoFile => {
-            const id = `${videoFile.name}-${videoFile.lastModified}`;
-            const videoBaseName = videoFile.name.substring(0, videoFile.name.lastIndexOf('.'));
-            const subtitleFile = subtitles.find(s => s.name.startsWith(videoBaseName));
-            
-            const newItem = { id, videoFile, subtitleFile, tags: [] };
-            fetchMetadata(newItem);
-            return newItem;
-        });
-
-        setMediaLibrary(prev => [...prev, ...newMedia]);
+    const handleSelectFolder = async () => {
+        try {
+            const dirHandle = await window.showDirectoryPicker();
+            await saveDirectoryHandle(dirHandle);
+            await processDirectory(dirHandle);
+        } catch (error) {
+            console.error("User cancelled folder selection or an error occurred:", error);
+        }
     };
 
     const handleMediaSelect = (media) => {
@@ -252,26 +301,21 @@ export default function App() {
 
     const joinWatchParty = (partyId) => {
         if (!isFirebaseReady || !db || !userId) return;
-        
         setWatchParty({ id: partyId, isHost: false });
         setIsPlayerView(true);
     };
 
     const handleJoinPrompt = () => {
         const partyId = prompt("Enter Watch Party ID:");
-        if (partyId) {
-            joinWatchParty(partyId.toUpperCase());
-        }
+        if (partyId) joinWatchParty(partyId.toUpperCase());
     };
 
     const leaveWatchParty = () => {
-        // Clean up all peer connections
         peerConnections.current.forEach(pc => pc.close());
         peerConnections.current.clear();
         setWatchParty({ id: null, isHost: false });
         setIsPlayerView(false);
     };
-    
 
     // --- Sub-components ---
     const Header = () => (
@@ -279,60 +323,32 @@ export default function App() {
             <h1 className="text-2xl font-bold text-white tracking-wider">My<span className="text-red-500">Flix</span></h1>
             <div className="flex-1 max-w-xl relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" size={20} />
-                <input
-                    type="text"
-                    placeholder="Search movies, series, or tags..."
-                    className="w-full bg-gray-700 text-white rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
-                    value={searchTerm}
-                    onChange={(e) => setSearchTerm(e.target.value)}
-                />
+                <input type="text" placeholder="Search movies, series, or tags..." className="w-full bg-gray-700 text-white rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:ring-2 focus:ring-red-500" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             </div>
             <div className="flex items-center gap-4">
                 <button onClick={handleJoinPrompt} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg" disabled={!isFirebaseReady}>Join Party</button>
-                <select
-                    className="bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500"
-                    value={sortOption}
-                    onChange={(e) => setSortOption(e.target.value)}
-                >
+                <select className="bg-gray-700 text-white rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-red-500" value={sortOption} onChange={(e) => setSortOption(e.target.value)}>
                     <option value="title-asc">Title (A-Z)</option>
                     <option value="title-desc">Title (Z-A)</option>
                     <option value="year-asc">Year (Oldest)</option>
                     <option value="year-desc">Year (Newest)</option>
                 </select>
-                <button
-                    onClick={() => fileInputRef.current.click()}
-                    className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors"
-                >
-                    <Upload size={20} /> Upload
+                <button onClick={handleSelectFolder} className="bg-red-600 hover:bg-red-700 text-white font-bold py-2 px-4 rounded-lg flex items-center gap-2 transition-colors">
+                    <Upload size={20} /> Select Folder
                 </button>
             </div>
         </header>
     );
 
-    const ApiKeyWarning = () => !TMDB_API_KEY ? (
-        <div className="bg-yellow-500/20 border border-yellow-600 text-yellow-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
-            <AlertTriangle/>
-            <div><strong>Warning:</strong> Movie metadata (posters, descriptions) is disabled because the TMDB API key is not configured.</div>
-        </div>
-    ) : null;
-
-    const FirebaseWarning = () => !firebaseConfig.apiKey ? (
-        <div className="bg-blue-500/20 border border-blue-600 text-blue-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3">
-            <AlertTriangle/>
-            <div><strong>Info:</strong> Watch Party features are disabled. To enable them, set up your Firebase configuration when deploying the app.</div>
-        </div>
-    ) : null;
-
+    const ApiKeyWarning = () => !TMDB_API_KEY ? ( <div className="bg-yellow-500/20 border border-yellow-600 text-yellow-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3"><AlertTriangle/><div><strong>Warning:</strong> Movie metadata (posters, descriptions) is disabled.</div></div>) : null;
+    const FirebaseWarning = () => !firebaseConfig.apiKey ? ( <div className="bg-blue-500/20 border border-blue-600 text-blue-300 px-4 py-3 rounded-lg relative mx-8 mb-4 flex items-center gap-3"><AlertTriangle/><div><strong>Info:</strong> Watch Party features are disabled.</div></div>) : null;
+    
     const MediaItem = ({ item, isFocused }) => {
         const metadata = metadataCache[item.id];
         const title = metadata?.Title || cleanMediaName(item.videoFile.name);
         const poster = metadata?.Poster && metadata.Poster !== 'N/A' ? metadata.Poster : 'https://placehold.co/300x450/1a1a1a/FFFFFF?text=No+Image';
-
         return (
-            <div
-                onClick={() => handleMediaSelect(item)}
-                className={`group cursor-pointer transition-all duration-300 transform ${isFocused ? 'scale-105 ring-4 ring-red-500 z-10' : 'hover:scale-105'}`}
-            >
+            <div onClick={() => handleMediaSelect(item)} className={`group cursor-pointer transition-all duration-300 transform ${isFocused ? 'scale-105 ring-4 ring-red-500 z-10' : 'hover:scale-105'}`}>
                 <img src={poster} alt={title} className="w-full h-auto object-cover rounded-lg shadow-lg" />
                 <div className="absolute inset-0 bg-black/70 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4 rounded-lg">
                     <h3 className="text-white font-bold text-lg">{title}</h3>
@@ -344,7 +360,6 @@ export default function App() {
 
     const DetailView = () => {
         if (!selectedMedia) return null;
-
         const metadata = metadataCache[selectedMedia.id] || {};
         const title = metadata.Title || cleanMediaName(selectedMedia.videoFile.name);
         const poster = metadata.Poster && metadata.Poster !== 'N/A' ? metadata.Poster : 'https://placehold.co/300x450/1a1a1a/FFFFFF?text=No+Image';
@@ -375,18 +390,14 @@ export default function App() {
                             <span className="border-l border-gray-600 pl-4">{metadata.Runtime}</span>
                         </div>
                         <p className="text-gray-300 mt-6 flex-grow overflow-y-auto max-h-40">{metadata.Plot || 'No description available.'}</p>
-                        
                         <div className="mt-4">
                             <p className="text-white font-semibold">Tags:</p>
-                            <div className="flex flex-wrap gap-2 mt-2">
-                                {(selectedMedia.tags || []).map(tag => <span key={tag} className="bg-red-500/50 text-white px-2 py-1 rounded-md text-sm">{tag}</span>)}
-                            </div>
+                            <div className="flex flex-wrap gap-2 mt-2"> {(selectedMedia.tags || []).map(tag => <span key={tag} className="bg-red-500/50 text-white px-2 py-1 rounded-md text-sm">{tag}</span>)} </div>
                             <form onSubmit={handleAddTag} className="flex gap-2 mt-2">
                                 <input ref={tagInputRef} type="text" placeholder="Add a tag..." className="bg-gray-700 text-white rounded-md px-3 py-1 flex-grow focus:outline-none focus:ring-1 focus:ring-red-500"/>
                                 <button type="submit" className="bg-gray-600 hover:bg-gray-500 text-white px-3 py-1 rounded-md">Add</button>
                             </form>
                         </div>
-
                         <div className="flex gap-4 mt-8">
                             <button onClick={playSolo} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex-1">Play Solo</button>
                             <button onClick={createWatchParty} className="bg-gray-700 hover:bg-gray-600 text-white font-bold py-3 px-6 rounded-lg" disabled={!isFirebaseReady}>Create Watch Party</button>
@@ -400,7 +411,7 @@ export default function App() {
     const VideoPlayer = () => {
         const videoRef = useRef(null);
         const playerContainerRef = useRef(null);
-        const [isPlaying, setIsPlaying] = useState(true);
+        const [isPlaying, setIsPlaying] = useState(false);
         const [progress, setProgress] = useState(0);
         const [duration, setDuration] = useState(0);
         const [volume, setVolume] = useState(1);
@@ -417,111 +428,74 @@ export default function App() {
         useEffect(() => {
             setIsFullScreenSupported(!!document.fullscreenEnabled);
             if (isGuest) {
-                 // Guest logic: get party info and initiate connection
                 const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
                 getDoc(partyRef).then(docSnap => {
-                    if (docSnap.exists()) {
-                        setPartyInfo(docSnap.data());
-                    }
+                    if (docSnap.exists()) setPartyInfo(docSnap.data());
                 });
             }
         }, [isGuest]);
 
-        // Host: Listen for guests and create peer connections
         useEffect(() => {
             if (!watchParty.isHost || !db || !videoRef.current) return;
-        
             const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
             const guestsRef = collection(partyRef, 'guests');
-        
             const unsubscribe = onSnapshot(guestsRef, (snapshot) => {
                 snapshot.docChanges().forEach(async (change) => {
                     if (change.type === 'added') {
                         const guestId = change.doc.id;
                         const guestData = change.doc.data();
-                        
                         if (guestData.offer && !peerConnections.current.has(guestId)) {
                             const pc = new RTCPeerConnection(peerConnectionConfig);
                             peerConnections.current.set(guestId, pc);
-                            
-                            // Add host's video stream to the connection
                             const videoStream = videoRef.current.captureStream();
                             videoStream.getTracks().forEach(track => pc.addTrack(track, videoStream));
-        
                             await pc.setRemoteDescription(new RTCSessionDescription(guestData.offer));
                             const answer = await pc.createAnswer();
                             await pc.setLocalDescription(answer);
-        
                             await updateDoc(change.doc.ref, { answer });
-        
                             pc.onicecandidate = (event) => {
-                                if (event.candidate) {
-                                    addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
-                                }
+                                if (event.candidate) addDoc(collection(change.doc.ref, 'hostCandidates'), event.candidate.toJSON());
                             };
                         }
                     }
                 });
             });
-        
             return () => unsubscribe();
         }, [watchParty.isHost, db]);
 
-        // Guest: Create offer and set up peer connection
         useEffect(() => {
             if (!isGuest || !db || !partyInfo) return;
-        
             const pc = new RTCPeerConnection(peerConnectionConfig);
             peerConnections.current.set(userId, pc);
-        
             pc.ontrack = (event) => {
-                if (event.streams && event.streams[0]) {
-                    setStream(event.streams[0]);
-                }
+                if (event.streams && event.streams[0]) setStream(event.streams[0]);
             };
-        
             const setupConnection = async () => {
                 const partyRef = doc(db, "artifacts", appId, "public", "data", "watch_parties", watchParty.id);
                 const guestRef = doc(partyRef, 'guests', userId);
-
                 const offer = await pc.createOffer();
                 await pc.setLocalDescription(offer);
-
                 await setDoc(guestRef, { offer });
-
-                // Listen for the host's answer
                 const unsubAnswer = onSnapshot(guestRef, async (snapshot) => {
                     const data = snapshot.data();
                     if (!pc.currentRemoteDescription && data?.answer) {
                         await pc.setRemoteDescription(new RTCSessionDescription(data.answer));
                     }
                 });
-
-                // Listen for host's ICE candidates
                  const hostCandidatesRef = collection(guestRef, 'hostCandidates');
                  const unsubHostCandidates = onSnapshot(hostCandidatesRef, (snapshot) => {
                      snapshot.docChanges().forEach((change) => {
-                         if (change.type === 'added') {
-                             pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
-                         }
+                         if (change.type === 'added') pc.addIceCandidate(new RTCIceCandidate(change.doc.data()));
                      });
                  });
-
-                return () => {
-                    unsubAnswer();
-                    unsubHostCandidates();
-                }
+                return () => { unsubAnswer(); unsubHostCandidates(); }
             };
-            
             setupConnection();
-
         }, [isGuest, db, partyInfo, userId]);
         
-        // Assign stream to video element for guests
         useEffect(() => {
             if (videoRef.current && stream && isGuest) {
                 videoRef.current.srcObject = stream;
-                videoRef.current.play().catch(e => console.error("Error playing stream:", e));
             }
         }, [stream, isGuest]);
 
@@ -534,20 +508,13 @@ export default function App() {
             else videoRef.current.pause();
         }, [isGuest]);
 
-        const handleTimeUpdate = useCallback(() => {
-            if (videoRef.current) setProgress(videoRef.current.currentTime);
-        }, []);
-
         const handleSeek = (e) => {
-            if (isGuest) return;
+            if (isGuest || !videoRef.current) return;
             const progressBar = e.currentTarget;
             const rect = progressBar.getBoundingClientRect();
             const offsetX = e.clientX - rect.left;
             const seekTime = (offsetX / rect.width) * duration;
-            if (videoRef.current) {
-                videoRef.current.currentTime = seekTime;
-                setProgress(seekTime);
-            }
+            videoRef.current.currentTime = seekTime;
         };
         
         const handleVolumeChange = (e) => {
@@ -573,18 +540,22 @@ export default function App() {
             if (!vid) return;
             const onPlay = () => setIsPlaying(true);
             const onPause = () => setIsPlaying(false);
+            const onTimeUpdate = () => setProgress(vid.currentTime);
             const onLoadedMetadata = () => setDuration(vid.duration);
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
-            vid.addEventListener('timeupdate', handleTimeUpdate);
+            vid.addEventListener('timeupdate', onTimeUpdate);
             vid.addEventListener('loadedmetadata', onLoadedMetadata);
+            if(isSolo || watchParty.isHost) {
+              vid.play().catch(e => console.log("Autoplay prevented"));
+            }
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
-                vid.removeEventListener('timeupdate', handleTimeUpdate);
+                vid.removeEventListener('timeupdate', onTimeUpdate);
                 vid.removeEventListener('loadedmetadata', onLoadedMetadata);
             };
-        }, [handleTimeUpdate]);
+        }, [isSolo, watchParty.isHost]);
         
         const VolumeIcon = () => {
             if (volume === 0) return <VolumeX size={24} />;
@@ -596,7 +567,7 @@ export default function App() {
 
         return (
             <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
-                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous" autoPlay>
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous">
                     {videoSrc && <source src={videoSrc} type={selectedMedia.videoFile.type} />}
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
@@ -609,12 +580,9 @@ export default function App() {
                          {watchParty.id && <div className="text-white bg-red-600 px-3 py-1 rounded-md">Party ID: {watchParty.id}</div>}
                     </div>
                      <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/70 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                        <div 
-                            className={`w-full h-1.5 bg-gray-600/50 group/progress relative ${isGuest ? 'cursor-not-allowed' : 'cursor-pointer'}`} 
-                            onClick={handleSeek}
-                        >
-                            <div className="absolute top-0 left-0 h-full bg-red-500" style={{ width: `${(progress / duration) * 100}%` }}></div>
-                            <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-[5px] opacity-0 group-hover/progress:opacity-100" style={{ left: `calc(${(progress / duration) * 100}% - 8px)` }}></div>
+                        <div className={`w-full h-1.5 bg-gray-600/50 group/progress relative ${isGuest ? 'cursor-not-allowed' : 'cursor-pointer'}`} onClick={handleSeek}>
+                            <div className="absolute top-0 left-0 h-full bg-red-500" style={{ width: duration ? `${(progress / duration) * 100}%` : '0%' }}></div>
+                            <div className="w-4 h-4 bg-red-500 rounded-full absolute -top-[5px] opacity-0 group-hover/progress:opacity-100" style={{ left: duration ? `calc(${(progress / duration) * 100}% - 8px)`: '0%' }}></div>
                         </div>
                         <div className="flex items-center justify-between mt-2">
                             <div className="flex items-center gap-4">
@@ -647,23 +615,21 @@ export default function App() {
 
     return (
         <div className="bg-gray-900 min-h-screen text-white font-sans">
-            <input type="file" multiple webkitdirectory="" ref={fileInputRef} onChange={handleFileUpload} className="hidden" />
             <Header />
             <main className="p-8">
                 <ApiKeyWarning />
                 <FirebaseWarning />
-                {filteredMedia.length > 0 ? (
+                {isLoading ? (
+                     <div className="text-center py-20 text-gray-400">Loading your media library...</div>
+                ) : filteredMedia.length > 0 ? (
                     <div ref={mainGridRef} className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-6">
                         {filteredMedia.map((item, index) => <MediaItem key={item.id} item={item} isFocused={index === focusedIndex} />)}
                     </div>
                 ) : (
                     <div className="text-center py-20">
                         <h2 className="text-2xl text-gray-400">Your media library is empty.</h2>
-                        <button
-                            onClick={() => fileInputRef.current.click()}
-                            className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex items-center gap-2 transition-colors mx-auto"
-                        >
-                            <Upload size={20} /> Click here to upload a folder
+                        <button onClick={handleSelectFolder} className="mt-4 bg-red-600 hover:bg-red-700 text-white font-bold py-3 px-6 rounded-lg flex items-center gap-2 transition-colors mx-auto">
+                            <Upload size={20} /> Click here to select a folder
                         </button>
                     </div>
                 )}
