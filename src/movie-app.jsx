@@ -421,7 +421,6 @@ export default function App() {
         const [isFullScreen, setIsFullScreen] = useState(false);
         const [isFullScreenSupported, setIsFullScreenSupported] = useState(false);
         const isSyncing = useRef(false);
-        const controlsTimeout = useRef(null);
         
         useEffect(() => {
             setIsFullScreenSupported(!!document.fullscreenEnabled);
@@ -429,6 +428,21 @@ export default function App() {
 
         const videoSrc = selectedMedia ? URL.createObjectURL(selectedMedia.videoFile) : null;
         const subtitleSrc = selectedMedia?.subtitleFile ? URL.createObjectURL(selectedMedia.subtitleFile) : null;
+
+        // Effect to handle playing the video when the component loads
+        useEffect(() => {
+            if (videoRef.current && videoSrc) {
+                const playPromise = videoRef.current.play();
+                if (playPromise !== undefined) {
+                    playPromise.catch(error => {
+                        // Auto-play was prevented, which is common in browsers.
+                        // The user will need to click the play button manually.
+                        console.log("Auto-play was prevented. User must interact to play.", error);
+                        setIsPlaying(false);
+                    });
+                }
+            }
+        }, [videoSrc]);
 
         const updatePartyState = useCallback(async (state) => {
             if (watchParty.id && watchParty.isHost && isFirebaseReady) {
@@ -467,8 +481,12 @@ export default function App() {
 
 
         const togglePlay = () => {
-            if (videoRef.current.paused) videoRef.current.play();
-            else videoRef.current.pause();
+            if (!videoRef.current) return;
+            if (videoRef.current.paused) {
+                videoRef.current.play();
+            } else {
+                videoRef.current.pause();
+            }
         };
 
         const handleTimeUpdate = () => {
@@ -489,8 +507,11 @@ export default function App() {
         const toggleFullScreen = () => {
             if (!isFullScreenSupported) return;
             try {
-                if (!document.fullscreenElement) playerContainerRef.current.requestFullscreen();
-                else document.exitFullscreen();
+                if (!document.fullscreenElement) {
+                    playerContainerRef.current.requestFullscreen();
+                } else {
+                    document.exitFullscreen();
+                }
                 setIsFullScreen(!!document.fullscreenElement);
             } catch (error) {
                 console.error("Fullscreen request failed:", error);
@@ -503,15 +524,18 @@ export default function App() {
 
             const onPlay = () => { setIsPlaying(true); if (watchParty.isHost) updatePartyState({ isPlaying: true }); };
             const onPause = () => { setIsPlaying(false); if (watchParty.isHost) updatePartyState({ isPlaying: false }); };
-            
+            const onLoadedMetadata = () => setDuration(vid.duration);
+
             vid.addEventListener('play', onPlay);
             vid.addEventListener('pause', onPause);
             vid.addEventListener('timeupdate', handleTimeUpdate);
-            vid.addEventListener('loadedmetadata', () => setDuration(vid.duration));
+            vid.addEventListener('loadedmetadata', onLoadedMetadata);
 
             return () => {
                 vid.removeEventListener('play', onPlay);
                 vid.removeEventListener('pause', onPause);
+                vid.removeEventListener('timeupdate', handleTimeUpdate);
+                vid.removeEventListener('loadedmetadata', onLoadedMetadata);
             };
         }, [updatePartyState, watchParty.isHost]);
 
@@ -519,7 +543,7 @@ export default function App() {
 
         return (
             <div ref={playerContainerRef} className="fixed inset-0 bg-black z-40 flex items-center justify-center">
-                <video ref={videoRef} className="w-full h-full" autoPlay>
+                <video ref={videoRef} className="w-full h-full" crossOrigin="anonymous">
                     <source src={videoSrc} type={selectedMedia.videoFile.type} />
                     {subtitleSrc && <track label="English" kind="subtitles" srcLang="en" src={subtitleSrc} default />}
                 </video>
