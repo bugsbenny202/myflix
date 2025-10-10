@@ -5,8 +5,10 @@ import { getFirestore, doc, setDoc, onSnapshot, updateDoc, serverTimestamp } fro
 import { Search, Upload, X, Tv, Film, Settings, ChevronsRight, ChevronsLeft, Play, Pause, Maximize, Minimize, AlertTriangle } from 'lucide-react';
 
 // --- Configuration ---
-// This more direct approach is robust for Vercel's build environment.
-const firebaseConfigString = process.env.REACT_APP_FIREBASE_CONFIG || '{}';
+// Safely access environment variables to prevent "process is not defined" errors.
+const firebaseConfigString = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_FIREBASE_CONFIG)
+  ? process.env.REACT_APP_FIREBASE_CONFIG
+  : '{}';
 let firebaseConfig = {};
 try {
     // Safely parse the Firebase config string
@@ -15,9 +17,14 @@ try {
     console.error("Could not parse Firebase config. Ensure it's a valid JSON string in your environment variables.", e);
 }
 
-const TMDB_API_KEY = process.env.REACT_APP_TMDB_API_KEY || null;
-const appId = process.env.REACT_APP_ID || 'default-app-id';
+const TMDB_API_KEY = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_TMDB_API_KEY)
+  ? process.env.REACT_APP_TMDB_API_KEY
+  : null;
+const appId = (typeof process !== 'undefined' && process.env && process.env.REACT_APP_ID)
+  ? process.env.REACT_APP_ID
+  : 'default-app-id';
 const TMDB_IMAGE_BASE_URL = 'https://image.tmdb.org/t/p/w500';
+
 
 // --- Helper Functions ---
 const cleanMediaName = (name) => {
