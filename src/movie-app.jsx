@@ -19,6 +19,23 @@ const peerConnectionConfig = {
   ],
 };
 
+// --- IndexedDB Helpers for Persistence ---
+const DB_NAME = 'MyFlixDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'mediaFiles';
+
+const openDB = () => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(STORE_NAME, { keyPath: 'id' });
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+};
+
+
 // --- Helper Functions ---
 const cleanMediaName = (name) => {
     return name
@@ -47,8 +64,7 @@ export default function App() {
     const [userId, setUserId] = useState(null);
     const [watchParty, setWatchParty] = useState({ id: null, isHost: false });
     const [isFirebaseReady, setIsFirebaseReady] = useState(false);
-    const [isLoading, setIsLoading] = useState(false); // Initialize loading state
-
+    
     const mainGridRef = useRef(null);
     const tagInputRef = useRef(null);
     const peerConnections = useRef(new Map());
@@ -339,16 +355,27 @@ export default function App() {
         const playerRef = useRef(null);
         const [stream, setStream] = useState(null);
         const [partyInfo, setPartyInfo] = useState(null);
+        const [playerUrl, setPlayerUrl] = useState(null);
 
         const isGuest = watchParty.id && !watchParty.isHost;
         const isSolo = !watchParty.id;
 
-        const videoSrc = useMemo(() => {
-            if ((watchParty.isHost || isSolo) && selectedMedia) {
-                return URL.createObjectURL(selectedMedia.videoFile);
+        // Effect to create and manage the Object URL for local files
+        useEffect(() => {
+            let objectUrl = null;
+            if ((watchParty.isHost || isSolo) && selectedMedia?.videoFile) {
+                objectUrl = URL.createObjectURL(selectedMedia.videoFile);
+                setPlayerUrl(objectUrl);
             }
-            return null;
+            
+            // Cleanup function to revoke the object URL
+            return () => {
+                if (objectUrl) {
+                    URL.revokeObjectURL(objectUrl);
+                }
+            };
         }, [watchParty.isHost, isSolo, selectedMedia]);
+
 
         const subtitleSrc = useMemo(() => {
             if ((watchParty.isHost || isSolo) && selectedMedia?.subtitleFile) {
@@ -362,7 +389,7 @@ export default function App() {
                 const videoElement = playerRef.current.getInternalPlayer();
                 if (videoElement && typeof videoElement.captureStream === 'function') {
                     const videoStream = videoElement.captureStream();
-                    // Now you have the stream to send to peers
+                    // Setup peer connections with this stream
                 }
             }
         }, [watchParty.isHost]);
@@ -379,15 +406,14 @@ export default function App() {
         // ... (WebRTC logic remains largely the same, connecting to the stream from handlePlayerReady)
         
         useEffect(() => {
-            // Revoke object URLs on cleanup to prevent memory leaks
+            // Revoke subtitle object URLs on cleanup
             return () => {
-                if (videoSrc) URL.revokeObjectURL(videoSrc);
                 if (subtitleSrc) URL.revokeObjectURL(subtitleSrc);
             };
-        }, [videoSrc, subtitleSrc]);
+        }, [subtitleSrc]);
 
         const partyTitle = partyInfo?.mediaName || metadataCache[selectedMedia?.id]?.Title;
-        const currentUrl = isGuest ? stream : videoSrc;
+        const currentUrl = isGuest ? stream : playerUrl;
 
         return (
             <div className="fixed inset-0 bg-black z-40 flex items-center justify-center">
@@ -399,7 +425,7 @@ export default function App() {
                 <div className="absolute top-4 text-center text-white text-xl ml-4 bg-black/30 p-2 rounded-lg">{partyTitle || 'Loading...'}</div>
                 {watchParty.id && <div className="absolute top-4 right-4 text-white bg-red-600 px-3 py-1 rounded-md z-50">Party ID: {watchParty.id}</div>}
 
-                <ReactPlayer
+                {currentUrl && <ReactPlayer
                     ref={playerRef}
                     url={currentUrl}
                     playing={true}
@@ -420,7 +446,7 @@ export default function App() {
                             }] : [],
                         },
                     }}
-                />
+                />}
             </div>
         );
     };
